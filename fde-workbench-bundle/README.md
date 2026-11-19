@@ -139,32 +139,34 @@ drwxr-xr-x  types/                     ← tsc 中间产物（host/ 与 client/�
 ## 3. 会话嵌入是怎么做的（只用官方公开扩展点）
 
 ```text
-main 面板（WorkbenchMain）
+main 面板（WorkbenchMain）children 声明 'workbench.node.chat'
 └─ NodeSessionView
    ├─ 解析 sessionId：会话列表里最近活跃的非子会话（Host 按最近活跃排序）
    ├─ ctx.sessions.retain(sessionId, { source: 'workbenchEmbed' })   ← 官方 Session 引用
-   ├─ renderFactorySlot('workbench.node.chat', { reference })        ← 本插件声明的工厂
-   │   └─ 局部槽位 conversation → NodeChatConversation
-   │        ├─ <SessionProvider session={reference}>                 ← 官方会话作用域座席
-   │        ├─ phase / hero 按 plugin-integration.md §4.1.1 第 2 条计算
-   │        └─ renderFactorySlot('conversation.content',
-   │               { variant: 'embedded', phase, hero },
-   │               { slots: { views: FixedChatView } })
+   ├─ renderSlot('workbench.node.chat', { reference })               ← 外壳槽位
+   │   └─ WorkbenchChatShell：<SessionProvider session={reference}>
+   │        renderSlot('workbench.node.chat.conversation', {})       ← 内容座席
+   │          └─ WorkbenchConversationPanel：
+   │               renderFactorySlot('conversation.content',
+   │                 { variant: 'embedded', phase, hero },
+   │                 { slots: { views: FixedChatView } })
    └─ 失败态：会话拿不到 / retain 抛错 → 本区域内显示错误 + 「新建会话」+「重试」，不白屏
 ```
 
-关键结论（来自 `dsh-v0.2.2-rc.5` 源码实读 + 本机类型检查）：
+关键结论（源码实读 + 类型检查 + 运行期实测）：
 
-1. **`conversation.content` 只能在「工厂定义」里调用**：`renderFactorySlot` 绑定在调用它的
-   工厂/条目上，普通 entry 直接调 `conversation.content` 会被槽位归属校验拒绝。
-   官方 `ui-subagent` 的做法是「会话作用域里声明一个单槽位 → 组件里 `renderSlot` →
-   槽位组件调用 `conversation.content` 工厂」，本包照搬这一结构（换成自己的工厂名）。
-2. **`SessionProvider` 只在声明了会话作用域子槽位的注册项里出现**；本包 `main` 面板的
-   `inject` 里因此拿不到它，必须由 `workbench.node.chat.conversation` 局部槽位组件来承接。
-3. **尺寸/滚动**：外层容器 `display:flex; flex-direction:column; height:100%; min-height:0`，
+1. **不要自建工厂承载会话内容**。早期写法把局部槽位名 `workbench.node.chat.conversation`
+   当作工厂名传给 `renderFactorySlot`；`FactoryOutlet` 中 `host.factoryOf()` 查不到定义后
+   **直接返回 null**（`ui-renderer/src/client/scoped-slots.tsx`），表现为"容器高度正常、
+   内容空白、控制台无报错"。
+2. **`SessionProvider` 不在 `PropsRuntime` 上，而在 `PropsRenderSlots` 中**：`standardKit()`
+   按 `entry.children` 是否含非 root 槽位发放。所以外壳注册项必须真实声明一个会话子槽位，
+   这正是官方 `SidebarChatTabProps = PropsRuntime<…> & PropsRenderSlots<…>` 的形状。
+3. **槽位注册要用 `ctx.slots.inject(key, cb)`**，不能裸 `register`：注册若先于父条目
+   `children` 声明执行，会抛 `slot "…" is not declared` 让整个插件激活失败。
+4. **尺寸/滚动**：外层容器 `display:flex; flex-direction:column; height:100%; min-height:0`，
    工厂输出自己撑满；`embedded` 变体不渲染全屏 Hero（`hero && variant !== 'embedded'`）。
-4. `phase` / `hero` / `openState` 的实际取值写在容器 `data-embed-*` 属性上，
-   装好后在 DevTools 里可直接核对冒烟结果。
+5. `phase` / `hero` / `openState` 的实际取值写在容器 `data-embed-*` 属性上，可在 DevTools 核对。
 
 ## 4. 可携带 dsh（Web 形态，调研结论 —— 仅记录，未落地部署）
 

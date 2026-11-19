@@ -164,11 +164,26 @@ RequirementPage
 | `<SessionProvider>` 是 `ui-slots`/`ui-renderer` 提供的标准会话作用域席位 | `ui-slots/src/index.ts`、`ui-renderer/src/client/scoped-slots.tsx` |
 | `embedded` 变体不渲染全屏 Hero（`hero && variant !== 'embedded'`），尺寸由宿主容器决定 | `ui-conversation/src/client/skeleton/ConversationContent.tsx` |
 
-**实测纠正（T0-3 源码实读 + 类型校验结论）**：
+**实测结论（源码 + 运行期共同确认，代码以此为准）**：
 
-1. **`conversation.content` 只能在「工厂定义」内部调用**。普通 entry 拿到的 `renderFactorySlot` 绑定在 entry 自身，去渲染别的工厂的槽位会被槽位归属校验拒绝。正确做法是照搬官方 `ui-subagent` 的结构：**自建一个会话作用域工厂**（如 `workbench.node.chat`），其局部槽位组件里 `<SessionProvider>` + `renderFactorySlot('conversation.content', …)`。
-2. **`SessionProvider` 只出现在声明了会话子槽位的注册项上**；`main` 面板的 inject 里没有它，必须由上述局部槽位组件承接。
-3. 组件把实际的 `phase`/`hero` 写到容器 `data-*` 属性上，便于装好后在 DevTools 直接核对。
+1. **不要自建工厂承载会话内容**。曾尝试的写法是把局部槽位名当作工厂名调用 `renderFactorySlot('workbench.node.chat.conversation', …)`；`FactoryOutlet` 里 `host.factoryOf()` 查不到定义后**直接返回 null**（`ui-renderer/src/client/scoped-slots.tsx`），结果是"高度正常、内容空白、无报错"。这类静默失败必须靠 DOM 断言发现。
+2. **`SessionProvider` 不在 `PropsRuntime` 上，而在 `PropsRenderSlots` 里**：它由 `standardKit()` 按 `entry.children` 是否含非 root 槽位发放。因此承载它的注册项**必须真的声明一个会话子槽位**，不能用单层槽位简化。
+3. 正确结构即官方 `registerSidebarChat()` 的两级槽位：
+
+```text
+main 面板 children 声明 '{ workbench.node.chat: { kind: 'single', scope: 'session' } }'
+  └─ slots.inject('workbench.node.chat', () => register(shell))
+       PropsRuntime & PropsRenderSlots<'workbench.node.chat.conversation'>
+       组件内：<SessionProvider session={reference}>
+                 renderSlot('workbench.node.chat.conversation', {})
+               </SessionProvider>
+  └─ slots.inject('workbench.node.chat.conversation', () => register(panel))
+       组件内：renderFactorySlot('conversation.content',
+                 { variant: 'embedded', phase, hero }, { slots: { views: FixedChatView } })
+```
+
+4. **槽位注册必须用 `ctx.slots.inject(key, cb)`**，不能裸 `register`：插件里槽位注册若先于父条目的 `children` 声明执行，会抛 `slot "…" is not declared` 导致整个插件激活失败。`inject` 会在声明就绪时才执行回调。
+5. 组件把实际的 `phase`/`hero` 写到容器 `data-*` 属性上，便于装好后在 DevTools 与 DOM 断言里核对。
 
 **实现要点**：
 
