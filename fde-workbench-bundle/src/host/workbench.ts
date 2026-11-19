@@ -113,17 +113,15 @@ export class NodeDirectory {
   /**
    * 按需求 ID 求当前节点（prompt 段用：那里只有需求 ID，没有会话 cwd）。
    *
-   * 与 `resolveNode` 的差别：找不到时返回 undefined 而不是抛错——prompt 段宁可不出现，
-   * 也不能因为一次解析失败把会话的提示组装弄挂。
    * @param requirementId - 需求 ID
    * @param signal - 取消信号
-   * @returns 节点上下文或 undefined
+   * @returns 后端当前的节点上下文
    */
-  async resolveNodeByRequirement(requirementId: number, signal?: AbortSignal): Promise<NodeContext | undefined> {
-    const cached = this.cache.get(requirementId)
-    if (cached !== undefined) return cached
-    const discovered = await this.locateCurrentNode(requirementId, signal).catch(() => undefined)
-    if (discovered !== undefined) this.remember(discovered)
+  async resolveNodeByRequirement(requirementId: number, signal?: AbortSignal): Promise<NodeContext> {
+    // 用户可在页面推进节点。每次组装会话上下文都按后端状态重新定位。
+    const discovered = await this.locateCurrentNode(requirementId, signal)
+    this.assertSameRequirement(discovered, requirementId)
+    this.remember(discovered)
     return discovered
   }
 

@@ -41,11 +41,15 @@ export class ApiError extends Error {
   /** HTTP 状态码；网络层失败为 0 */
   readonly status: number
 
-  constructor(code: number, message: string, status = 0) {
+  /** 业务错误附带的结构化详情，例如删除受阻时的引用清单。 */
+  readonly data: unknown
+
+  constructor(code: number, message: string, status = 0, data?: unknown) {
     super(message)
     this.name = 'ApiError'
     this.code = code
     this.status = status
+    this.data = data
   }
 }
 
@@ -137,7 +141,7 @@ export class ApiClient {
     if (envelope.code !== 0) {
       // 401/10101 = 未登录或过期：通知上层跳回登录页（页面不在这里自行跳转）
       if (envelope.code === CODE_UNAUTHORIZED || response.status === 401) this.unauthorizedHandler?.()
-      throw new ApiError(envelope.code, envelope.message, response.status)
+      throw new ApiError(envelope.code, envelope.message, response.status, envelope.data)
     }
     return envelope.data
   }

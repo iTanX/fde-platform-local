@@ -16,7 +16,7 @@
 import { useMemo, useState } from 'react'
 import { messageOf } from '../../api/client.ts'
 import type { SkillVO, WorkflowNodeWrite, WorkflowVO } from '../../api/types.ts'
-import { useNavigation, type AppStore } from '../../store/app-store.ts'
+import { useAppState, useNavigation, type AppStore } from '../../store/app-store.ts'
 import { useWorkbench } from '../../store/context.tsx'
 import { ErrorState, Loading } from '../../ui/components.tsx'
 import { PageShell } from '../../ui/PageShell.tsx'
@@ -122,26 +122,36 @@ export function WorkflowEditorPage({ store, projectId, workflowId }: {
 }) {
   const { api, t, toast } = useWorkbench()
   const nav = useNavigation(store)
+  const currentUserId = useAppState(store).user?.id
   const workflow = useLoadable(() => api.workflow.detail(workflowId), [workflowId])
+  const project = useLoadable(() => api.project.detail(projectId), [projectId])
   const skills = useLoadable(() => api.skill.list(projectId), [projectId])
+  const matchingWorkflow = workflow.state.kind === 'ready' && workflow.state.data.projectId === projectId ? workflow.state.data : undefined
+  const canEdit = matchingWorkflow !== undefined && project.state.kind === 'ready'
+    && (matchingWorkflow.createdBy === currentUserId || project.state.data.ownerId === currentUserId)
 
   return (
     <PageShell
       page="workflow-editor"
       back={{ label: t('editor.back'), onClick: () => { nav.back() } }}
-      title={workflow.state.kind === 'ready' ? workflow.state.data.name : `#${workflowId}`}
-      subtitle={t('editor.dragHint')}
+      title={matchingWorkflow?.name ?? `#${workflowId}`}
+      subtitle={project.state.kind === 'ready' && matchingWorkflow !== undefined ? t(canEdit ? 'editor.dragHint' : 'editor.readonly') : undefined}
     >
-      {workflow.state.kind === 'loading' ? <Loading label={t('common.loading')} /> : null}
+      {workflow.state.kind === 'loading' || project.state.kind === 'loading' ? <Loading label={t('common.loading')} /> : null}
       {workflow.state.kind === 'failed'
         ? <ErrorState message={workflow.state.message} onRetry={workflow.reload} retryLabel={t('common.retry')} />
         : null}
-      {workflow.state.kind === 'ready'
+      {project.state.kind === 'failed'
+        ? <ErrorState message={project.state.message} onRetry={project.reload} retryLabel={t('common.retry')} />
+        : null}
+      {workflow.state.kind === 'ready' && matchingWorkflow === undefined ? <ErrorState message={t('project.notFound')} /> : null}
+      {matchingWorkflow !== undefined && project.state.kind === 'ready'
         ? (
           <EditorBody
             // revision 变化（重新加载后）时重建编辑态，避免拿着旧副本继续保存
-            key={String(workflow.state.data.revision)}
-            workflow={workflow.state.data}
+            key={String(matchingWorkflow.revision)}
+            workflow={matchingWorkflow}
+            canEdit={canEdit}
             skillList={skills.state.kind === 'ready' ? skills.state.data : []}
             skillsError={skills.state.kind === 'failed' ? skills.state.message : undefined}
             onSaved={() => { workflow.reload(); toast(t('editor.saved')) }}
@@ -156,8 +166,9 @@ export function WorkflowEditorPage({ store, projectId, workflowId }: {
 /**
  * 编辑器主体：持有编辑态副本（`useState(toDrafts(workflow))`），保存成功后才丢弃。
  */
-function EditorBody({ workflow, skillList, skillsError, onSaved, onReload }: {
+function EditorBody({ workflow, canEdit, skillList, skillsError, onSaved, onReload }: {
   readonly workflow: WorkflowVO
+  readonly canEdit: boolean
   readonly skillList: readonly SkillVO[]
   readonly skillsError?: string | undefined
   readonly onSaved: () => void
@@ -238,6 +249,7 @@ function EditorBody({ workflow, skillList, skillsError, onSaved, onReload }: {
 
   /** 保存：成功用返回的流程刷新（拿到新 revision），失败展示后端文案。 */
   const save = async (): Promise<void> => {
+    if (!canEdit || busy) return
     setBusy(true)
     setError(undefined)
     try {
@@ -261,6 +273,7 @@ function EditorBody({ workflow, skillList, skillsError, onSaved, onReload }: {
         ? null
         : <ErrorState message={t('editor.skillsLoadFailed', { message: skillsError })} />}
 
+      {canEdit ? (
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <button
           type="button"
@@ -287,6 +300,7 @@ function EditorBody({ workflow, skillList, skillsError, onSaved, onReload }: {
           {busy ? t('common.saving') : t('editor.save')}
         </button>
       </div>
+      ) : null}
 
       {nodes.length === 0
         ? <div style={{ padding: '20px 0', ...muted }} data-fde-editor-empty="">{t('editor.noNodes')}</div>
@@ -300,6 +314,7 @@ function EditorBody({ workflow, skillList, skillsError, onSaved, onReload }: {
             index={index}
             total={nodes.length}
             expanded={expanded.has(node.uid)}
+            canEdit={canEdit}
             dragging={dragging === node.uid}
             dropTarget={dropTarget === node.uid}
             skills={skillList}
@@ -336,6 +351,7 @@ function NodeCard(props: {
   readonly index: number
   readonly total: number
   readonly expanded: boolean
+  readonly canEdit: boolean
   readonly dragging: boolean
   readonly dropTarget: boolean
   readonly skills: readonly SkillVO[]
@@ -351,7 +367,7 @@ function NodeCard(props: {
   readonly onDrop: () => void
   readonly t: ReturnType<typeof useWorkbench>['t']
 }) {
-  const { node, index, total, expanded, dragging, dropTarget, skills, t } = props
+  const { node, index, total, expanded, canEdit, dragging, dropTarget, skills, t } = props
   return (
     <div
       data-fde-node-card={node.nodeId ?? `new-${index}`}
@@ -366,16 +382,16 @@ function NodeCard(props: {
       onDrop={(event) => { event.preventDefault(); props.onDrop() }}
     >
       <div
-        style={{ ...cardRow, background: color.bgSubtle, cursor: 'grab', userSelect: 'none' }}
-        // 拖动把手放在整行标题上（draggable 的必须是节点标题，避免拖不了输入框里的文字）
-        draggable
-        onDragStart={(event) => {
+        style={{ ...cardRow, background: color.bgSubtle, cursor: canEdit ? 'grab' : undefined, userSelect: 'none' }}
+        // 拖动把手放在标题上，使输入区仍可正常选中文字。
+        draggable={canEdit}
+        onDragStart={canEdit ? (event) => {
           event.dataTransfer.effectAllowed = 'move'
           // Firefox 需要 setData 才会触发 drag 事件
           event.dataTransfer.setData('text/plain', node.uid)
           props.onDragStart()
-        }}
-        onDragEnd={props.onDragEnd}
+        } : undefined}
+        onDragEnd={canEdit ? props.onDragEnd : undefined}
         data-fde-node-drag={node.nodeId ?? `new-${index}`}
       >
         <span style={{ ...muted, width: '20px', flex: '0 0 auto', textAlign: 'right' }}>{index + 1}</span>
@@ -396,19 +412,19 @@ function NodeCard(props: {
             {t('workflows.nodes', { count: node.outputs.length })}
           </span>
         </button>
-        <button type="button" style={buttonLink} data-fde-node-up={node.nodeId ?? `new-${index}`} disabled={index === 0} onClick={props.onMoveUp} title={t('editor.moveUp')}>
-          ↑
-        </button>
-        <button type="button" style={buttonLink} data-fde-node-down={node.nodeId ?? `new-${index}`} disabled={index === total - 1} onClick={props.onMoveDown} title={t('editor.moveDown')}>
-          ↓
-        </button>
+        {canEdit ? (
+          <>
+            <button type="button" style={buttonLink} data-fde-node-up={node.nodeId ?? `new-${index}`} disabled={index === 0} onClick={props.onMoveUp} title={t('editor.moveUp')}>↑</button>
+            <button type="button" style={buttonLink} data-fde-node-down={node.nodeId ?? `new-${index}`} disabled={index === total - 1} onClick={props.onMoveDown} title={t('editor.moveDown')}>↓</button>
+          </>
+        ) : null}
         <button type="button" style={buttonBase} onClick={props.onToggle}>{expanded ? t('editor.collapse') : t('editor.expand')}</button>
-        <button type="button" style={buttonDanger} data-fde-node-remove={node.nodeId ?? `new-${index}`} onClick={props.onRemove}>{t('editor.removeNode')}</button>
+        {canEdit ? <button type="button" style={buttonDanger} data-fde-node-remove={node.nodeId ?? `new-${index}`} onClick={props.onRemove}>{t('editor.removeNode')}</button> : null}
       </div>
 
       {expanded
         ? (
-          <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <fieldset disabled={!canEdit} style={{ margin: 0, border: 0, minWidth: 0, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '8px', alignItems: 'center' }}>
               <label style={formLabel}>{t('editor.nodeName')}</label>
               <input
@@ -451,34 +467,33 @@ function NodeCard(props: {
               />
             </div>
 
-            {/* 输入项：仅固定输入 */}
-            <div data-fde-editor-inputs={node.nodeId ?? `new-${index}`}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{ ...formLabel, fontSize: '13px' }}>{t('editor.inputs')}</span>
-                <button
-                  type="button"
-                  style={buttonBase}
-                  data-fde-add-input={node.nodeId ?? `new-${index}`}
-                  disabled={node.inputType !== 'fixed'}
-                  onClick={() => { props.onPatch({ inputs: [...node.inputs, emptyItem()] }) }}
-                >
-                  {t('editor.addInput')}
-                </button>
-                {node.inputType === 'free' ? <span style={muted}>{t('editor.inputsIgnored')}</span> : null}
+            {/* 自由输入时隐藏固定项，切回固定输入时可继续编辑原草稿。 */}
+            {node.inputType === 'fixed' ? (
+              <div data-fde-editor-inputs={node.nodeId ?? `new-${index}`}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{ ...formLabel, fontSize: '13px' }}>{t('editor.inputs')}</span>
+                  <button
+                    type="button"
+                    style={buttonBase}
+                    data-fde-add-input={node.nodeId ?? `new-${index}`}
+                    onClick={() => { props.onPatch({ inputs: [...node.inputs, emptyItem()] }) }}
+                  >
+                    {t('editor.addInput')}
+                  </button>
+                </div>
+                {node.inputs.map((item, itemIndex) => (
+                  <ItemRow
+                    key={item.uid}
+                    kind="inputs"
+                    item={item}
+                    index={itemIndex}
+                    t={t}
+                    onPatch={(patch) => { props.onPatchItem('inputs', item.uid, patch) }}
+                    onRemove={() => { props.onPatch({ inputs: node.inputs.filter(entry => entry.uid !== item.uid) }) }}
+                  />
+                ))}
               </div>
-              {node.inputs.map((item, itemIndex) => (
-                <ItemRow
-                  key={item.uid}
-                  kind="inputs"
-                  item={item}
-                  index={itemIndex}
-                  disabled={node.inputType !== 'fixed'}
-                  t={t}
-                  onPatch={(patch) => { props.onPatchItem('inputs', item.uid, patch) }}
-                  onRemove={() => { props.onPatch({ inputs: node.inputs.filter(entry => entry.uid !== item.uid) }) }}
-                />
-              ))}
-            </div>
+            ) : null}
 
             {/* 输出项 */}
             <div data-fde-editor-outputs={node.nodeId ?? `new-${index}`}>
@@ -515,13 +530,13 @@ function NodeCard(props: {
                 : (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
                     {skills.map(skill => {
-                      const checked = node.skillIds.includes(skill.id)
+                      const order = node.skillIds.indexOf(skill.id) + 1
                       return (
                         <label key={skill.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px' }} data-fde-skill-option={skill.id}>
                           <input
                             type="checkbox"
                             data-fde-node-skill={`${node.nodeId ?? `new-${index}`}:${skill.id}`}
-                            checked={checked}
+                            checked={order > 0}
                             onChange={(event) => {
                               // 勾选追加到末尾（保持选择顺序），取消则移除
                               props.onPatch({
@@ -532,13 +547,14 @@ function NodeCard(props: {
                             }}
                           />
                           <span style={mono}>{skill.name}</span>
+                          {order === 0 ? null : <span style={muted}>{t('editor.skillOrder', { order })}</span>}
                         </label>
                       )
                     })}
                   </div>
                 )}
             </div>
-          </div>
+          </fieldset>
         )
         : null}
     </div>

@@ -9,7 +9,7 @@
 import { useState } from 'react'
 import { messageOf } from '../../api/client.ts'
 import type { WorkflowSummaryVO } from '../../api/types.ts'
-import { useNavigation, type AppStore } from '../../store/app-store.ts'
+import { useAppState, useNavigation, type AppStore } from '../../store/app-store.ts'
 import { useWorkbench } from '../../store/context.tsx'
 import { ConfirmDialog, EmptyState, ErrorState, FormDialog, Loading } from '../../ui/components.tsx'
 import { useLoadable } from '../../ui/use-loadable.ts'
@@ -19,9 +19,16 @@ import { buttonBase, buttonDanger, buttonPrimary, card, cardHeader, cardRow, col
  * 流程列表 Tab。
  * @param props - 页面栈 store 与项目 ID。
  */
-export function WorkflowsTab({ store, projectId }: { readonly store: AppStore; readonly projectId: number }) {
+export function WorkflowsTab({ store, projectId, isOwner }: {
+  readonly store: AppStore
+  readonly projectId: number
+  readonly isOwner: boolean
+}) {
   const { api, t } = useWorkbench()
   const nav = useNavigation(store)
+  const currentUserId = useAppState(store).user?.id
+  // 项目成员都能创建流程。现有流程只有创建人和项目 owner 可修改。
+  const canEdit = (workflow: WorkflowSummaryVO) => isOwner || workflow.createdBy === currentUserId
   const workflows = useLoadable(() => api.workflow.list(projectId), [projectId])
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<WorkflowSummaryVO | undefined>(undefined)
@@ -129,14 +136,18 @@ export function WorkflowsTab({ store, projectId }: { readonly store: AppStore; r
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' }}>
                       <button type="button" style={buttonBase} onClick={() => { nav.openWorkflow(projectId, item.id) }}>
-                        {t('workflows.openEditor')}
+                        {t(canEdit(item) ? 'workflows.openEditor' : 'workflows.view')}
                       </button>
-                      <button type="button" style={buttonBase} data-fde-workflow-edit={item.id} onClick={() => { setDialogError(undefined); setEditing(item) }}>
-                        {t('common.edit')}
-                      </button>
-                      <button type="button" style={buttonDanger} data-fde-workflow-delete={item.id} onClick={() => { setDialogError(undefined); setRemoving(item) }}>
-                        {t('common.delete')}
-                      </button>
+                      {canEdit(item) ? (
+                        <>
+                          <button type="button" style={buttonBase} data-fde-workflow-edit={item.id} onClick={() => { setDialogError(undefined); setEditing(item) }}>
+                            {t('common.edit')}
+                          </button>
+                          <button type="button" style={buttonDanger} data-fde-workflow-delete={item.id} onClick={() => { setDialogError(undefined); setRemoving(item) }}>
+                            {t('common.delete')}
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                   </div>
                 ))}

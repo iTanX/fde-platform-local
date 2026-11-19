@@ -233,6 +233,8 @@ export interface RequirementNodeVO {
   readonly previousNode: PreviousNodeVO | null
   /** 只读：非当前节点、需求已完成、或我不是创建人（且不是 owner） */
   readonly readonly: boolean
+  /** 需求工作区绝对路径，仅可操作的当前节点可获得。 */
+  readonly workspacePath: string | null
   /** 节点默认会话的 DSH 会话标识 */
   readonly defaultSessionId: string | null
 }

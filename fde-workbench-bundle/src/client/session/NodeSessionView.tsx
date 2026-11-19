@@ -1,34 +1,10 @@
-/**
- * 节点页「会话」视图的冒烟实现 —— 把**一个真实 DSH 会话**嵌进工作台面板的非主面板位置。
- *
- * 依据 plugin-integration.md §4.1.1，只使用官方公开扩展点：
- * 1. `ctx.sessions.retain(sessionId, { source })` 取得会话引用（任意 SessionId，不限子会话）；
- * 2. `<SessionProvider session={reference}>` 声明会话作用域；
- * 3. `renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, { slots: { views: FixedChatView } })`
- *    渲染官方会话内容工厂（输入框、消息流、工具卡片、运行状态全部由 DSH 自己渲染，
- *    所以「可输入 / 可滚动 / Esc Esc 停止」这些原生快捷键保持生效）；
- * 4. `views` 局部槽位固定选 Chat 视图（与 ui-subagent 的官方先例 sidebar-chat 完全一致）。
- *
- * 为什么由「会话作用域槽位」承载（而不是自建工厂）：
- *   `renderFactorySlot` 由渲染框架按**注册项**发放（`boundRenderFactorySlot(entry)`），
- *   任何槽位组件拿到的都绑定在自己的注册项上，所以真正的归属校验是
- *   `FactoryOutlet` 去 `host.factoryOf(name)` 查**工厂定义**是否存在：
- *   - 工厂根里回头渲染自己的局部槽位名（旧写法 `'workbench.node.chat.conversation'`），
- *     `factoryOf()` 查不到 → `if (definition === undefined) return <>{fallback ?? null}</>`，
- *     无报错、无内容，这就是面板空白的原因；
- *   - 在槽位组件里渲染 `'conversation.content'`，`factoryOf()` 能查到官方工厂，正常渲染。
- *   结构照搬官方 ui-subagent（`sidebar-chat/index.tsx` 的 `registerSidebarChat()`）：
- *   外层注册项声明会话子槽位 → 内层槽位注册项的组件（官方叫 `ConversationSlotPanel`，
- *   这里叫 `WorkbenchConversationPanel`）里 `<SessionProvider>` + 调 `conversation.content` 工厂。
- *
- * 失败态：拿不到会话 / retain 抛错时，只在本区域内显示错误与「新建会话」「重试」，绝不白屏。
- */
-import { useCallback, useEffect, useState } from 'react'
-import type { ISessions, SessionReference, SessionRetainOptions } from '@deepseek-ai/dsh-api-session-controller/client'
+/** 在节点页中用 DSH 的会话作用域与 conversation.content 工厂嵌入原生对话。 */
+import { useEffect, useState } from 'react'
+import type { ISessions, SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRenderFactories, PropsRenderSlots, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 
-/** 工作台命名空间的翻译函数类型（key 域来自声明的字典）。 */
+/** 工作台命名空间的翻译函数。 */
 export type WorkbenchTranslate = TranslateNS<'workbench'>
 
 declare module '@deepseek-ai/dsh-api-session-controller/client' {
@@ -38,173 +14,82 @@ declare module '@deepseek-ai/dsh-api-session-controller/client' {
   }
 }
 
-/** `ctx.sessions` 的稳定子集。 */
 export interface SessionHost {
   readonly sessions: Pick<ISessions, 'list' | 'retain' | 'refresh'>
+  /** 验证已登记会话存在且属于当前需求的工作区。 */
+  readonly resolveSession: (workspacePath: string, dshSessionId: string) => Promise<SessionId>
 }
 
-/** 本插件嵌入槽位 `workbench.node.chat` 的 owner 参数（由外层 `renderSlot` 在渲染点传入）。 */
 export interface NodeChatOwnerProps {
-  /** 要嵌入的会话引用（由调用方 retain，本组件不负责释放）。 */
+  /** 调用方持有并释放引用。 */
   readonly reference: SessionReference
 }
 
-// 槽位 owner 参数的单一来源：SlotMap 里用 `owner: NodeChatOwnerProps` 声明过，
-// 这里再取一次交给 renderSlot 的 owner 形参类型（值相等，保证两处不会漂移）。
-
-/** 嵌入视图的文案与依赖。 */
-export interface NodeSessionViewProps {
-  /** 工作台命名空间的翻译函数。 */
-  readonly t: WorkbenchTranslate
-  /** 会话宿主（apply() 里注入的 ctx 引用）。 */
-  readonly host: SessionHost
-  /** 新建会话（走官方 ctx.uiWorkspace.startSession）。 */
-  readonly onCreateSession: () => void
-  /**
-   * 由渲染框架注入：渲染本插件声明的槽位 `workbench.node.chat`。
-   * 注意它渲染的是**槽位**（kind: 'single'），不是工厂（旧写法误把它当工厂名用）。
-   */
-  readonly renderSlot: (name: 'workbench.node.chat', owner: NodeChatOwnerProps) => React.ReactNode
-}
-
-/** 会话解析结果。 */
-type ResolveState =
+type EmbedState =
   | { readonly kind: 'loading' }
-  | { readonly kind: 'ready'; readonly id: SessionId }
-  | { readonly kind: 'empty' }
-  | { readonly kind: 'failed'; readonly message: string }
+  | { readonly kind: 'ready'; readonly reference: SessionReference }
+  | { readonly kind: 'failed'; readonly message?: string }
 
-/**
- * 挑选要嵌入的会话：侧栏当前选中的会话（uiWorkspace 记录）优先，否则最近活跃的非子会话。
- * 本阶段用列表顺序（Host 按最近活跃排序）即可，T5-3 会替换为「按节点绑定的会话」。
- * @param sessions - 会话服务。
- */
-function pickSessionId(sessions: SessionHost['sessions']): SessionId | undefined {
-  const state = sessions.list.getSnapshot()
-  return state.ids.find((id) => state.byId[id]?.origin !== 'subagent')
-}
-
-/** 把任意异常转成一行可展示文字。 */
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-const linkButton = {
-  appearance: 'none', border: 'none', background: 'transparent', color: 'inherit', font: 'inherit',
-  padding: 0, textDecoration: 'underline', cursor: 'pointer',
-} as const
-
-const primaryButton = {
-  appearance: 'none', border: '1px solid var(--dsw-alias-border-subtle, rgba(0,0,0,0.12))',
-  background: 'transparent', color: 'inherit', borderRadius: '6px', padding: '3px 10px', font: 'inherit',
-  cursor: 'pointer', marginTop: '8px',
-} as const
-
-/** 提示块。 */
-function Notice({ children }: { readonly children: React.ReactNode }) {
-  return <div style={{ padding: '12px 16px', fontSize: '13px', lineHeight: 1.6, opacity: 0.8 }}>{children}</div>
-}
-
-/**
- * 节点页「会话」视图（冒烟版）。
- * @param props - 翻译函数、会话宿主、新建会话回调与子槽位渲染能力。
- */
-export function NodeSessionView({ t, host, onCreateSession, renderSlot }: NodeSessionViewProps) {
-  const { sessions } = host
-  const [state, setState] = useState<ResolveState>({ kind: 'loading' })
-  const [reference, setReference] = useState<SessionReference | undefined>(undefined)
+/** 嵌入调用方指定的会话。调用方以会话 ID 为 key，切换时释放旧引用。 */
+export function NodeSessionView({ t, host, workspacePath, dshSessionId, renderSlot }: {
+  readonly t: WorkbenchTranslate
+  readonly host: SessionHost
+  readonly workspacePath: string
+  readonly dshSessionId: string
+  readonly renderSlot: (name: 'workbench.node.chat', owner: NodeChatOwnerProps) => React.ReactNode
+}) {
+  const [state, setState] = useState<EmbedState>({ kind: 'loading' })
   const [retryToken, setRetryToken] = useState(0)
 
-  // 第 1 步：解析要嵌入的 sessionId。
   useEffect(() => {
-    let cancelled = false
-    setState({ kind: 'loading' })
+    const acquisition = new AbortController()
+    let reference: SessionReference | undefined
     void (async () => {
       try {
-        await sessions.refresh()
-        if (cancelled) return
-        const id = pickSessionId(sessions)
-        setState(id === undefined ? { kind: 'empty' } : { kind: 'ready', id })
+        const id = await host.resolveSession(workspacePath, dshSessionId)
+        if (acquisition.signal.aborted) return
+        reference = host.sessions.retain(id, { source: 'workbenchEmbed', signal: acquisition.signal })
+        const binding = await reference.ready
+        if (acquisition.signal.aborted) return
+        // 历史读取的业务错误会写入快照，ready 仍可正常结束。
+        const snapshot = binding.session.getSnapshot()
+        if (snapshot.removed) {
+          reference.release()
+          reference = undefined
+          setState({ kind: 'failed' })
+          return
+        }
+        if (snapshot.openError !== null) throw new Error(snapshot.openError.message)
+        setState({ kind: 'ready', reference })
       } catch (error) {
-        if (!cancelled) setState({ kind: 'failed', message: errorMessage(error) })
+        reference?.release()
+        reference = undefined
+        if (!acquisition.signal.aborted) {
+          setState({ kind: 'failed', message: error instanceof Error ? error.message : String(error) })
+        }
       }
     })()
     return () => {
-      cancelled = true
+      acquisition.abort()
+      reference?.release()
+      reference = undefined
     }
-  }, [sessions, retryToken])
-
-  // 第 2 步：持有会话引用；会话切换或卸载时释放。新引用就绪前保留旧引用，避免闪断。
-  useEffect(() => {
-    if (state.kind !== 'ready') return
-    let disposed = false
-    let held: SessionReference | undefined
-    try {
-      const options: SessionRetainOptions = { source: 'workbenchEmbed' }
-      held = sessions.retain(state.id, options)
-      if (!disposed) setReference(held)
-    } catch (error) {
-      if (!disposed) setState({ kind: 'failed', message: errorMessage(error) })
-    }
-    return () => {
-      disposed = true
-      held?.release()
-    }
-  }, [sessions, state])
-
-  // 「新建会话」走官方导航动作（与侧栏「新建会话」同一条路径），不调用任何业务接口。
-  const createSession = useCallback(() => {
-    try {
-      onCreateSession()
-      setRetryToken(token => token + 1)
-    } catch (error) {
-      setState({ kind: 'failed', message: errorMessage(error) })
-    }
-  }, [onCreateSession])
-
-  const retry = useCallback(() => { setRetryToken(token => token + 1) }, [])
+  }, [host, workspacePath, dshSessionId, retryToken])
 
   return (
-    <div
-      data-fde-workbench-session-view=""
-      style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, height: '100%' }}
-    >
-      <div
-        style={{
-          display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 16px 8px',
-          fontSize: '12px', opacity: 0.7, flex: '0 0 auto',
-        }}
-      >
-        <strong style={{ fontWeight: 600 }}>{t('session.heading')}</strong>
-        <span data-fde-workbench-session-id="">{state.kind === 'ready' ? state.id : t('session.noSession')}</span>
-        <button type="button" onClick={retry} style={linkButton}>{t('session.reload')}</button>
-      </div>
-      <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        {state.kind === 'loading' ? <Notice>{t('session.loading')}</Notice> : null}
-        {state.kind === 'empty'
-          ? (
-            <Notice>
-              <div>{t('session.empty')}</div>
-              <div>{t('session.emptyHint')}</div>
-              <button type="button" onClick={createSession} style={primaryButton}>{t('session.create')}</button>
-            </Notice>
-          )
-          : null}
-        {state.kind === 'failed'
-          ? (
-            <Notice>
-              <div data-fde-workbench-error="">{t('session.error', { message: state.message })}</div>
-              <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                <button type="button" onClick={retry} style={linkButton}>{t('session.retry')}</button>
-                <button type="button" onClick={createSession} style={primaryButton}>{t('session.create')}</button>
-              </div>
-            </Notice>
-          )
-          : null}
-        {state.kind === 'ready' && reference !== undefined
-          ? renderSlot('workbench.node.chat', { reference })
-          : null}
-      </div>
+    <div data-fde-workbench-session-view="" style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}>
+      <span hidden data-fde-workbench-session-id="">{dshSessionId}</span>
+      {state.kind === 'loading' ? <div role="status">{t('session.loading')}</div> : null}
+      {state.kind === 'failed' ? (
+        <div>
+          <div data-fde-workbench-error="">{t('session.error', { message: state.message ?? t('session.missing') })}</div>
+          <button type="button" onClick={() => {
+            setState({ kind: 'loading' })
+            setRetryToken(token => token + 1)
+          }}>{t('session.retry')}</button>
+        </div>
+      ) : null}
+      {state.kind === 'ready' ? renderSlot('workbench.node.chat', { reference: state.reference }) : null}
     </div>
   )
 }

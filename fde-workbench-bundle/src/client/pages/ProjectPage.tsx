@@ -1,17 +1,13 @@
-/**
- * 项目页：横向四 Tab「需求 / 流程 / 技能 / 成员」（PRD AC-B1.1：切换 Tab 不离开项目）。
- *
- * 本任务（T5-3）负责：
- * - 四个 Tab 的壳与切换（Tab 状态在页面栈里，节点页返回时仍停在原 Tab）；
- * - 需求 Tab（列表 + 新建需求选流程 + 进入需求）与流程 Tab（列表 + 新建 + 进入编辑器）的宿主；
- * - 技能 / 成员 Tab 是**只读列表占位**（T5-4 做完整功能：上传、版本、删除、成员管理）。
- */
-import { useNavigation, type AppStore, type ProjectTab } from '../store/app-store.ts'
+/** 项目页四个页签共享项目详情与权限状态。 */
+import { useState } from 'react'
+import type { ProjectVO } from '../api/types.ts'
+import { useAppState, useNavigation, type AppStore, type ProjectTab } from '../store/app-store.ts'
 import { useWorkbench } from '../store/context.tsx'
-import { SkillTabPlaceholder, MembersTabPlaceholder } from './project/ReadonlyTabs.tsx'
+import { MembersTab } from './members/MembersTab.tsx'
+import { SkillsTab } from './project/SkillsTab.tsx'
 import { RequirementsTab } from './requirements/RequirementsTab.tsx'
 import { WorkflowsTab } from './workflows/WorkflowsTab.tsx'
-import { ErrorState, UnderlineTabs } from '../ui/components.tsx'
+import { ErrorState, Loading, UnderlineTabs } from '../ui/components.tsx'
 import { PageShell } from '../ui/PageShell.tsx'
 import { useLoadable } from '../ui/use-loadable.ts'
 import { buttonBase } from '../ui/styles.ts'
@@ -35,19 +31,31 @@ export function ProjectPage({ projectId, tab, store }: {
 }) {
   const { api, t } = useWorkbench()
   const nav = useNavigation(store)
+  const currentUserId = useAppState(store).user?.id
   const detail = useLoadable(() => api.project.detail(projectId), [projectId])
+  const [refreshKey, setRefreshKey] = useState(0)
+  const project = detail.state.kind === 'ready' ? detail.state.data : undefined
+  const isOwner = project !== undefined && project.ownerId === currentUserId
+
+  const refresh = () => {
+    detail.reload()
+    setRefreshKey(key => key + 1)
+  }
+
+  const onTransfer = (updated: ProjectVO) => {
+    // 转让改了 owner 和 revision，也更新本项目的导航缓存。
+    store.update(state => state.project?.id === updated.id ? { ...state, project: updated } : state)
+    detail.reload()
+  }
 
   return (
     <PageShell
       page="project"
       back={{ label: t('projects.title'), onClick: () => { nav.goProjects() } }}
-      title={detail.state.kind === 'ready' ? detail.state.data.name : `#${projectId}`}
-      subtitle={detail.state.kind === 'ready' && detail.state.data.description !== null ? detail.state.data.description : undefined}
+      title={project?.name ?? `#${projectId}`}
+      subtitle={project?.description ?? undefined}
       actions={(
-        <button type="button" style={buttonBase} data-fde-action="refresh-tab" onClick={() => {
-          // 刷新当前 Tab：切换一次 key 触发子页面重新挂载取数（子页面的 reload 在内部状态里）
-          window.dispatchEvent(new CustomEvent('fde-workbench:refresh-tab'))
-        }}>
+        <button type="button" style={buttonBase} data-fde-action="refresh-tab" onClick={refresh}>
           {t('common.refresh')}
         </button>
       )}
@@ -67,13 +75,18 @@ export function ProjectPage({ projectId, tab, store }: {
           </div>
         )
         : null}
-      {tab === 'requirements'
-        ? <RequirementsTab store={store} projectId={projectId} />
-        : tab === 'workflows'
-          ? <WorkflowsTab store={store} projectId={projectId} />
-          : tab === 'skills'
-            ? <SkillTabPlaceholder projectId={projectId} />
-            : <MembersTabPlaceholder projectId={projectId} />}
+      {detail.state.kind === 'loading' ? <Loading label={t('common.loading')} /> : null}
+      {project === undefined ? null : (
+        <div key={`${projectId}:${refreshKey}`}>
+          {tab === 'requirements'
+            ? <RequirementsTab store={store} projectId={projectId} />
+            : tab === 'workflows'
+              ? <WorkflowsTab store={store} projectId={projectId} isOwner={isOwner} />
+              : tab === 'skills'
+                ? <SkillsTab projectId={projectId} currentUserId={currentUserId} isOwner={isOwner} />
+                : <MembersTab project={project} currentUserId={currentUserId} onTransfer={onTransfer} />}
+        </div>
+      )}
     </PageShell>
   )
 }

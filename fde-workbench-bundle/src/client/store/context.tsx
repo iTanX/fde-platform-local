@@ -9,23 +9,13 @@ import { createContext, useContext, type ReactNode } from 'react'
 import type { WorkbenchApi } from '../api/index.ts'
 import type { AppStore } from '../store/app-store.ts'
 import type { ToastItem, Tone } from '../ui/components.tsx'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { NodeChatOwnerProps, SessionHost, WorkbenchTranslate } from '../session/NodeSessionView.tsx'
-import type { SessionCreateResult } from '../ui/session-bridge.ts'
 
-/**
- * 会话宿主能力：除了 embed 用的 sessions 引用，还要能「新建 DSH 会话并拿到 SessionId」。
- *
- * 为什么需要单独提供：`NodeSessionView` 只支持「挑一个已有会话嵌入」（T0-3 冒烟形态），
- * 而节点页要求「新建会话 → 登记到需求 → 切换到新会话」。新建走官方导航动作
- * （`ctx.uiWorkspace.connectWorkspace`，它返回 SessionId，且不会把侧栏选中态切走），
- * 之后由本插件调用业务接口把会话登记到需求节点（AC-X2.1）。
- */
+/** 工作台通过 DSH 控制器管理需求工作区内的会话。 */
 export interface WorkbenchSessionHost extends SessionHost {
-  /**
-   * 新建一个 DSH 会话并返回其 SessionId。
-   * @param requirementTitle - 需求标题（用于新建会话的标题）
-   */
-  readonly createSession: (requirementTitle: string) => Promise<SessionCreateResult>
+  /** 在后端返回的需求工作区内创建新的 DSH 会话。 */
+  readonly createSession: (workspacePath: string) => Promise<SessionId>
 }
 
 /** 功能域上下文值。 */

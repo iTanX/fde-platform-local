@@ -152,6 +152,7 @@ export function WorkbenchMain({ t, layout, api, store, sessionHost, renderSlot }
                       ? <RequirementDetailPage store={store} projectId={page.projectId} requirementId={page.requirementId} />
                       : (
                         <RequirementPage
+                          key={`${page.requirementId}:${page.nodeId}`}
                           store={store}
                           requirementId={page.requirementId}
                           nodeId={page.nodeId}

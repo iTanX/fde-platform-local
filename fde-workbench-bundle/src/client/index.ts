@@ -19,9 +19,9 @@ import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createWorkbenchApi, type WorkbenchApi } from './api/index.ts'
 import { ApiClient } from './api/client.ts'
 import { dicts, NS, type WorkbenchLocaleKey } from './locales.ts'
@@ -63,49 +63,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** 侧栏入口与 `main` 面板共用同一个面板 id（官方 plugin-manager / ui-schedule 同款做法）。 */
 export const PANEL_ID = 'workbench' as MainPanelId
 
-/**
- * 本插件 Client 半要求的服务：
- * - `slots` / `locale` / `layout` / `sessions` / `uiWorkspace`：注册槽位、文案、面板导航、会话与新建会话（T0-3 已有）；
- * - `workspaces`：T5-3 的「新建会话」要先用 `ctx.uiWorkspace.connectWorkspace(workspaceId)` 拿到
- *   工作区标识。cordis 的 `ctx.xxx` getter 在未 inject 时会直接抛
- *   `cannot get property "workspaces" without inject`（实测），因此必须显式声明。
- */
-export const inject = ['slots', 'locale', 'layout', 'sessions', 'uiWorkspace', 'workspaces']
+export const inject = ['slots', 'locale', 'layout', 'sessions', 'workspaces']
 
-/**
- * 新建一个 DSH 会话并返回它的 SessionId。
- *
- * 为什么不用 `uiWorkspace.startSession()`：它是「选中并打开一个空白会话」的导航动作，
- * 既**不返回** SessionId，又要求同一个工作区里已有可复用的空白会话——DSH 里一个会话都没有时，
- * 它会把主界面切到「选择工作区」的空态（实测），把用户从工作台里挤出去。所以不用它。
- *
- * 采用 `uiWorkspace.connectWorkspace(workspaceId)`：
- * - 它是官方公开 API，**返回 SessionId**，业务侧登记会话（`POST /api/requirements/{rid}/sessions`）正需要它；
- * - 它只建/复用工作区里的空白会话，不改变侧栏选中态，不会把界面切走。
- * 工作区标识从 `ctx.workspaces`（DSH 自己的工作区列表）解析：优先取与"当前会话 cwd"相同的工作区，
- * 否则取列表第一个。一个工作区都没有时返回可读错误（页面显示"重试"，不伪造会话）。
- *
- * 说明（交接 T5-4/T6-1）：按 PRD 设计，一个需求对应一个 workspace，路径由 Host 半生成；
- * 届时这里应改为「先按需求 workspace 路径找到/创建对应工作区」再 connectWorkspace，
- * 现在先复用 DSH 现有工作区。
- *
- * @param ctx - 浏览器侧插件上下文
- * @returns 新会话标识，或错误文案
- */
-async function createDshSession(ctx: ClientContext): Promise<{ sessionId?: string; error?: string }> {
-  const workspaces = ctx.workspaces.list.getSnapshot().items
-  const sessions = ctx.sessions.list.getSnapshot()
-  const currentCwd = sessions.ids[0] === undefined ? undefined : sessions.byId[sessions.ids[0]]?.cwd
-  const workspace = workspaces.find(item => currentCwd !== undefined && item.path === currentCwd) ?? workspaces[0]
-  if (workspace === undefined) {
-    return { error: 'DSH 中还没有工作区，无法新建会话（请先在 DSH 里添加一个工作区）' }
-  }
-  try {
-    const sessionId = await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId as WorkspaceId)
-    return { sessionId: String(sessionId) }
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
-  }
+/** DSH 注册工作区时会规范化绝对路径，并复用同一个真实目录的注册项。 */
+async function requirementWorkspace(ctx: ClientContext, path: string) {
+  return ctx.workspaces.list.getSnapshot().items.find(item => item.path === path)
+    ?? ctx.workspaces.create({ path })
 }
 
 /**
@@ -120,6 +83,28 @@ export function apply(ctx: ClientContext): void {
   const apiClient = new ApiClient()
   const api: WorkbenchApi = createWorkbenchApi(apiClient)
   const store = new AppStore()
+  const sessionHost: WorkbenchMainInjected['sessionHost'] = {
+    sessions: ctx.sessions,
+    async createSession(workspacePath) {
+      const workspace = await requirementWorkspace(ctx, workspacePath)
+      // 省略 sessionId 会创建全新会话。connectWorkspace 会复用空白会话。
+      return ctx.sessions.create({ workspaceId: workspace.workspaceId })
+    },
+    async resolveSession(workspacePath, dshSessionId) {
+      const workspace = await requirementWorkspace(ctx, workspacePath)
+      const id = dshSessionId as SessionId
+      let summary = ctx.sessions.list.getSnapshot().byId[id]
+      if (summary === undefined || summary.cwd !== workspace.path) {
+        await ctx.sessions.refresh()
+        summary = ctx.sessions.list.getSnapshot().byId[id]
+      }
+      if (summary === undefined) throw new Error(t('session.missing'))
+      if (summary.cwd !== workspace.path || summary.origin === 'subagent') {
+        throw new Error(t('session.wrongWorkspace'))
+      }
+      return id
+    },
+  }
   // 401（token 过期）统一回到登录页：由页面栈驱动，不做整页跳转
   apiClient.onUnauthorized(() => { store.signOut() })
 
@@ -137,15 +122,7 @@ export function apply(ctx: ClientContext): void {
       layout: ctx.layout,
       api,
       store,
-      sessionHost: {
-        sessions: ctx.sessions,
-        // 新建会话走官方 connectWorkspace（返回 SessionId，且不切走侧栏选中态），详见 createDshSession 的注释；
-        // 业务登记（POST /api/requirements/{rid}/sessions）由页面在拿到 SessionId 后完成。
-        createSession: async () => {
-          const created = await createDshSession(ctx)
-          return { dshSessionId: created.sessionId, registerError: created.error }
-        },
-      },
+      sessionHost,
     }),
   }, WorkbenchMain)), 'fde-workbench: main panel')
 

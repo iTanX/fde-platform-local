@@ -13,11 +13,10 @@
  *
  * 页签切换只改页面栈里的 `view` 字段，**不跳转、不离开工作台**（AC-F7.1）。
  *
- * 自动刷新（AC-F4.6）：节点信息视图在「未只读」时轮询 `advance-preview`；
- * 一旦 `ready=true`（全部必填输出项齐备）或节点状态不再是 `current`，就重新拉节点信息，
- * 让页面出现"已进入下一节点"的提示 / 只读态。切回页签、窗口重新获焦也会再拉一次。
+ * 节点推进以服务端节点状态为准，当前节点完成后沿用同一需求的会话进入下一节点。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError } from '../api/client.ts'
 import type { RequirementNodeVO } from '../api/types.ts'
 import { useNavigation, type AppStore } from '../store/app-store.ts'
 import { useWorkbench } from '../store/context.tsx'
@@ -60,36 +59,46 @@ export function RequirementPage({ store, requirementId, nodeId, view }: {
   }, [requirement.reload, node.reload])
 
   const nodeData: RequirementNodeVO | undefined = node.state.kind === 'ready' ? node.state.data : undefined
-  const readonly = nodeData?.readonly === true
+  const readonly = nodeData?.readonly !== false || nodeData.status !== 'current'
   const requirementReload = requirement.reload
 
-  // 节点状态变化（未被轮询捕到的推进）时提示一次，并刷新需求进度
+  const nodeStatus = nodeData?.status
   useEffect(() => {
-    if (nodeData === undefined) return
+    if (nodeStatus === undefined) return
     const previous = lastStatus.current
-    lastStatus.current = nodeData.status
-    if (previous !== undefined && previous !== nodeData.status) {
-      toast(t('node.info.staleRefreshed'))
-      requirementReload()
-    }
-  }, [nodeData?.status, toast, t, requirementReload])
+    lastStatus.current = nodeStatus
+    if (previous !== 'current' || nodeStatus !== 'done') return
+    toast(t('node.info.advanced'))
+    requirementReload()
+    void api.requirement.detail(requirementId).then(detail => {
+      if (!detail.permissions.canOperate) return
+      const next = detail.nodes.find(item => item.status === 'current')
+      if (next === undefined) return
+      // 只推进仍停留在这个节点的页面，并保留用户当前的页签。
+      store.update(state => {
+        const page = state.stack[state.stack.length - 1]
+        if (page?.kind !== 'node' || page.requirementId !== requirementId || page.nodeId !== nodeId) return state
+        return { ...state, stack: [...state.stack.slice(0, -1), { ...page, nodeId: next.id }] }
+      })
+    }).catch(() => undefined)
+  }, [api.requirement, nodeStatus, requirementId, nodeId, store, toast, t, requirementReload])
 
-  // 轮询推进条件：只看「未只读」的节点（只读节点不会变化）
   useEffect(() => {
-    if (nodeData === undefined || nodeData.readonly) return
+    if (nodeData === undefined || nodeData.readonly || nodeData.status !== 'current') return
     let disposed = false
     let timer: number | undefined
-    /** 查一次推进条件，ready 则刷新。 */
     const tick = async (): Promise<void> => {
       try {
-        const preview = await api.node.advancePreview(requirementId, nodeId)
-        if (!disposed && preview.ready) {
-          toast(t('node.info.advanced'))
+        const latest = await api.node.detail(requirementId, nodeId)
+        if (!disposed && (latest.readonly || latest.status !== 'current')) {
           refreshAll()
           return
         }
-      } catch {
-        // 预览失败不打扰用户（例如网络抖动），下一轮继续
+      } catch (error) {
+        if (!disposed && error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+          refreshAll()
+          return
+        }
       }
       if (!disposed) timer = window.setTimeout(() => { void tick() }, POLL_INTERVAL_MS)
     }
@@ -98,15 +107,14 @@ export function RequirementPage({ store, requirementId, nodeId, view }: {
       disposed = true
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [api.node, nodeData, requirementId, nodeId, refreshAll, toast, t])
+  }, [api.node, nodeData, requirementId, nodeId, refreshAll])
 
-  // 切回本页签 / 窗口重新获焦时重取（用户从对话回来后通常需要看到最新状态）
+  // 节点信息获焦后刷新文件。会话视图靠轮询验证节点，保持在途创建及原生会话引用。
   useEffect(() => {
-    /** 重新获焦时刷新节点。 */
-    const onFocus = (): void => { refreshAll() }
-    window.addEventListener('focus', onFocus)
-    return () => { window.removeEventListener('focus', onFocus) }
-  }, [refreshAll])
+    if (!readonly && view === 'session') return
+    window.addEventListener('focus', refreshAll)
+    return () => { window.removeEventListener('focus', refreshAll) }
+  }, [readonly, view, refreshAll])
 
   const req = requirement.state.kind === 'ready' ? requirement.state.data.requirement : undefined
   const tabs = readonly
@@ -163,22 +171,7 @@ export function RequirementPage({ store, requirementId, nodeId, view }: {
           */}
           <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             {(readonly ? 'info' : view) === 'session'
-              ? (req === undefined
-                ? (
-                  <div style={{ paddingTop: '8px' }}>
-                    {requirement.state.kind === 'failed'
-                      ? <ErrorState message={requirement.state.message} onRetry={requirementReload} retryLabel={t('common.retry')} />
-                      : <Loading label={t('common.loading')} />}
-                  </div>
-                )
-                : (
-                  <NodeSessionPanel
-                    requirement={req}
-                    defaultSessionId={nodeData.defaultSessionId}
-                    readonly={readonly}
-                  />
-                ))
-              
+              ? <NodeSessionPanel requirementId={requirementId} node={nodeData} />
               : (
                 <div style={{ overflow: 'auto', paddingBottom: '16px' }}>
                   <NodeInfoPanel

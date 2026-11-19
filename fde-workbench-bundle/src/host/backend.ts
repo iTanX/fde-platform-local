@@ -193,6 +193,22 @@ export class BackendClient {
     )
   }
 
+  /** 读取当前节点指定快照位置与版本的技能入口。 */
+  async nodeSkillEntry(
+    requirementId: number,
+    nodeInstanceId: number,
+    position: number,
+    versionNo: number,
+    signal?: AbortSignal,
+  ): Promise<{ content: string }> {
+    return await this.request<{ content: string }>(
+      'GET',
+      `/internal/requirements/${requirementId}/nodes/${nodeInstanceId}/skills/${position}?versionNo=${versionNo}`,
+      undefined,
+      signal,
+    )
+  }
+
   /**
    * 取某个需求下全部节点实例的定位摘要。
    *

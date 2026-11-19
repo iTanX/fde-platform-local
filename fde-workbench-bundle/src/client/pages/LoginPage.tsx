@@ -1,7 +1,7 @@
 /**
  * 登录页（PRD REQ-H1、AC-H1.1~H1.4）。
  *
- * - 用户名 + 密码（密码可为空字符串：演示账号 demo / demo2 就是空密码）。
+ * - 支持自助注册与登录，工作台账号密码可留空。
  * - 登录成功后把 JWT 交给 `ApiClient`（只存在内存里），并把用户写进页面栈 store，进入项目中心。
  * - 失败时区分三种情况：后端不可达（可重试，不白屏）、用户名不存在（后端文案"用户不存在，请先注册"）、
  *   密码错误；文案一律直接展示后端 message，避免前后端两份口径。
@@ -18,6 +18,7 @@ import { buttonBase, buttonDisabled, buttonPrimary, card, color, formLabel, form
 type Phase =
   | { readonly kind: 'idle' }
   | { readonly kind: 'submitting' }
+  | { readonly kind: 'registered' }
   | { readonly kind: 'failed'; readonly message: string; readonly unreachable: boolean }
 
 /**
@@ -31,18 +32,41 @@ export function LoginPage({ api, store, t }: {
 }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [registering, setRegistering] = useState(false)
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
 
-  /** 提交登录：成功后写 token + 进入项目中心。 */
+  const switchMode = () => {
+    setRegistering(value => !value)
+    setPassword('')
+    setPhase({ kind: 'idle' })
+  }
+
+  /** 注册成功后回到登录表单，JWT 由登录接口签发。 */
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
-    if (username.trim() === '') {
+    if (phase.kind === 'submitting') return
+    const name = username.trim()
+    if (name === '') {
       setPhase({ kind: 'failed', message: t('login.usernameRequired'), unreachable: false })
+      return
+    }
+    if (registering && !/^[A-Za-z0-9_]{3,32}$/.test(name)) {
+      setPhase({ kind: 'failed', message: t('login.registerUsername'), unreachable: false })
       return
     }
     setPhase({ kind: 'submitting' })
     try {
-      const result = await api.auth.login(username.trim(), password)
+      if (registering) {
+        await api.auth.register(name, password, displayName.trim() || undefined)
+        setUsername(name)
+        setPassword('')
+        setDisplayName('')
+        setRegistering(false)
+        setPhase({ kind: 'registered' })
+        return
+      }
+      const result = await api.auth.login(name, password)
       api.client.setToken(result.token)
       store.signIn(result.user)
     } catch (error) {
@@ -62,8 +86,8 @@ export function LoginPage({ api, store, t }: {
         onSubmit={(event) => { void submit(event) }}
         style={{ ...card, width: '400px', maxWidth: '100%', padding: '20px' }}
       >
-        <h2 style={{ margin: '0 0 6px', fontSize: '18px' }}>{t('login.title')}</h2>
-        <p style={{ ...muted, margin: '0 0 16px', lineHeight: 1.6 }}>{t('login.subtitle')}</p>
+        <h2 style={{ margin: '0 0 6px', fontSize: '18px' }}>{t(registering ? 'login.registerTitle' : 'login.title')}</h2>
+        <p style={{ ...muted, margin: '0 0 16px', lineHeight: 1.6 }}>{t(registering ? 'login.registerUsername' : 'login.subtitle')}</p>
 
         <div style={formRow}>
           <label style={formLabel} htmlFor="fde-login-username">{t('login.username')}</label>
@@ -72,6 +96,8 @@ export function LoginPage({ api, store, t }: {
             data-fde-field="username"
             autoFocus
             autoComplete="username"
+            disabled={submitting}
+            maxLength={registering ? 32 : undefined}
             value={username}
             onChange={(event) => { setUsername(event.target.value) }}
             style={inputBase}
@@ -83,13 +109,23 @@ export function LoginPage({ api, store, t }: {
             id="fde-login-password"
             data-fde-field="password"
             type="password"
-            autoComplete="current-password"
+            autoComplete={registering ? 'new-password' : 'current-password'}
+            disabled={submitting}
+            maxLength={registering ? 72 : undefined}
             value={password}
             onChange={(event) => { setPassword(event.target.value) }}
             style={inputBase}
           />
         </div>
 
+        {registering ? (
+          <div style={formRow}>
+            <label style={formLabel} htmlFor="fde-register-display-name">{t('login.displayName')}</label>
+            <input id="fde-register-display-name" data-fde-field="displayName" autoComplete="nickname" disabled={submitting}
+              maxLength={64} value={displayName} onChange={event => setDisplayName(event.target.value)} style={inputBase} />
+          </div>
+        ) : null}
+        {phase.kind === 'registered' ? <p role="status" style={muted}>{t('login.registered')}</p> : null}
         {failed
           ? (
             <div style={{ marginBottom: '12px' }}>
@@ -106,13 +142,18 @@ export function LoginPage({ api, store, t }: {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button
             type="submit"
-            data-fde-login-submit=""
+            data-fde-login-submit={registering ? undefined : ''}
+            data-fde-register-submit={registering ? '' : undefined}
             disabled={submitting}
             style={{ ...buttonPrimary, ...(submitting ? buttonDisabled : {}), padding: '5px 16px' }}
           >
-            {submitting ? t('login.submitting') : t('login.submit')}
+            {t(registering
+              ? (submitting ? 'login.registering' : 'login.register')
+              : (submitting ? 'login.submitting' : 'login.submit'))}
           </button>
-          <span style={muted}>{t('login.tip')}</span>
+          <button type="button" data-fde-auth-mode="" disabled={submitting} style={buttonBase} onClick={switchMode}>
+            {t(registering ? 'login.backToLogin' : 'login.register')}
+          </button>
         </div>
         <div style={{ marginTop: '12px', height: '1px', background: color.border }} />
         <p style={{ ...muted, margin: '12px 0 0' }} data-fde-login-backend="">

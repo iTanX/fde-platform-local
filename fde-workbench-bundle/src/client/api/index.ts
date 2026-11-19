@@ -214,9 +214,9 @@ export function createSessionApi(client: ApiClient) {
     /** 登记新建会话并绑定节点。 */
     create: (requirementId: number, body: SessionCreateRequest): Promise<SessionVO> =>
       client.json<SessionVO>('POST', `/requirements/${requirementId}/sessions`, compact(body)),
-    /** 更新会话最后活跃时间。 */
-    touch: (sessionId: number): Promise<SessionVO> =>
-      client.json<SessionVO>('POST', `/sessions/${sessionId}/touch`),
+    /** 更新最后活跃时间，并在指定节点时将此会话设为该节点的默认。 */
+    touch: (sessionId: number, nodeId?: number): Promise<SessionVO> =>
+      client.json<SessionVO>('POST', `/sessions/${sessionId}/touch`, nodeId === undefined ? undefined : { nodeId }),
   }
 }
 
