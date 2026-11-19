@@ -114,8 +114,8 @@ wb_requirement_node 1──n wb_requirement_node_output n──1 wb_file
 
 - `wb_agent_session` 以 `dsh_session_id` 唯一，记录所属 `requirement_id`。
 - 需求级默认会话：`requirement_id` 相同、`archived=0`、按 `last_active_at DESC` 取第一条；没有则新建。
-- **新建会话绑定节点（修正 M4）**：在需求页任何人新建的会话，都必须绑定到新建时所在的节点实例，写入 `wb_requirement_node.primary_session_id`（该节点已存在绑定则不覆盖）以及 `wb_node_session_link`（多对多，保留全部历史）。
-- **节点默认会话**：进入节点时优先打开该节点的 `primary_session_id`；为空时回退到需求级默认会话；两者都没有才新建。因此"节点推进后默认沿用同一会话、也可以新建会话"由数据明确表达，不依赖页面缓存。
+- 新建或显式选择会话时，后端保存当前节点的 `wb_requirement_node.primary_session_id`，并在 `wb_node_session_link` 保留节点已使用的会话关联。
+- 进入节点时先打开节点默认会话，再回退到本需求最近活跃且未归档的会话。推进事务将解析出的默认会话保存到下一节点。
 - `wb_session_runtime_info.last_node_instance_id` 记录"该会话最后在哪个节点"，用于进入需求时把页面恢复到上次的位置。
 - 若 DSH 侧会话已不存在（会话日志被清理），后端把该记录标记 `archived=1` 并在页面提示"会话已失效，请新建会话"，**不伪造历史**。
 

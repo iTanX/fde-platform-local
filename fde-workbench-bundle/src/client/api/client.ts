@@ -56,7 +56,7 @@ export class ApiError extends Error {
 /**
  * 后端地址的读取顺序：
  * 1. 显式注入：`globalThis.FDE_WORKBENCH_API_BASE`（部署到别的端口，或前面挂了同源反向代理时可用）；
- * 2. 缺省：`http://127.0.0.1:8081`（docs/api.md 的 base_url）。
+ * 2. 缺省：`http://127.0.0.1:8081/api`（docs/api.md 的 base_url 含 `/api` 前缀）。
  *
  * 注意：这里**不能**用 `import.meta.env` —— 插件 bundle 的产物格式是 CJS（`lib/client.js` 由 DSH 的
  * 模块加载器执行），rolldown 会把 `import.meta` 换成空对象并给出 EMPTY_IMPORT_META 警告。
@@ -67,7 +67,9 @@ function resolveBaseUrl(): string {
   // 约定：注入值就是完整的 `/api` 前缀本身（例如 `http://127.0.0.1:3040/fde-api`），
   // 下面的路径会直接拼在它后面（`/auth/login`、`/projects` …），所以这里只去掉尾部斜杠。
   if (typeof injected === 'string' && injected.trim() !== '') return injected.replace(/\/+$/, '')
-  return 'http://127.0.0.1:8081'
+  // 缺省值必须带上 `/api` 前缀：下面的路径都是 `/auth/login`、`/projects` 这类**不含 `/api`**
+  // 的片段，少写前缀会请求到 `http://127.0.0.1:8081/auth/login`，后端按未知路径拒绝（403）。
+  return 'http://127.0.0.1:8081/api'
 }
 
 /**

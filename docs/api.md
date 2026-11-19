@@ -354,7 +354,7 @@ base_url: "http://127.0.0.1:8081"
 - `readonly = true` 的三种情况：非当前节点、非需求创建人（且非 owner）、需求已完成。
 - `readonly = true` 时前端不显示会话页签与上传入口。
 - `previousNode` 为 `seq-1` 节点的输出文件；第一个节点为 `null`。
-- `defaultSessionId` 来自会话解析（见 9.1）。
+- `defaultSessionId` 来自会话解析（见第 9 节）。`workspacePath` 为本需求的 DSH 工作区绝对路径，仅对可操作的当前节点返回，供插件创建或打开需求级工作区。
 
 ### POST 上传输入
 
@@ -370,7 +370,7 @@ base_url: "http://127.0.0.1:8081"
 |---|---|---|---|
 | GET | `/api/requirements/{requirementId}/sessions` | M | 需求下全部会话（按 `lastActiveAt` 倒序） |
 | POST | `/api/requirements/{requirementId}/sessions` | C | 登记新建会话并绑定节点（修正 M4） |
-| POST | `/api/sessions/{sessionId}/touch` | C | 更新最后活跃时间 |
+| POST | `/api/sessions/{sessionId}/touch` | C | 更新最后活跃时间，可持久化当前节点的会话选择 |
 
 ### POST 新建会话登记
 
@@ -378,14 +378,20 @@ base_url: "http://127.0.0.1:8081"
 { "dshSessionId": "sess_xyz", "nodeId": 101, "title": "需求拆解会话" }
 ```
 
-- 事务：插入 `wb_agent_session`（`requirement_id`、`dsh_session_id` 唯一）→ 插入 `wb_session_runtime_info`（`last_node_instance_id`）→ 若该节点 `primary_session_id` 为空则设为新会话 → 插入 `wb_node_session_link`。
-- `dshSessionId` 已存在 → `409 10401`。
+- 公开登记必须提供本需求进行中的当前 `nodeId`。后端在同一个事务内登记会话、保存运行位置、把它设为节点默认会话并保留节点与会话的历史关联。
+- `dshSessionId` 全局唯一，重复登记返回 `409/10401`。
+
+### POST 更新活跃时间及会话选择
+
+`POST /api/sessions/{sessionId}/touch` 可传 `{"nodeId": 101}`。省略请求体或 `nodeId` 时，仅更新活跃时间。传入 `nodeId` 时，由有操作权限的用户将未归档会话设为同一需求当前节点的默认会话，后端同时保存运行位置和历史关联。节点不属于会话对应的需求返回 `400/10001`，节点状态不允许操作或会话已归档返回 `409/10404`。
 
 ### 节点默认会话解析顺序
 
-1. `wb_requirement_node.primary_session_id`。
-2. 需求下 `archived=0` 中 `last_active_at` 最大者。
-3. 都没有 → 返回 `{ "sessionId": null, "needCreate": true }`，由插件调用 `uiWorkspace.connectWorkspace` 创建后再调本组 POST 登记。
+1. 节点 `primary_session_id` 指向同需求且未归档的会话时，返回该会话。
+2. 否则返回本需求最近活跃的未归档会话。
+3. 没有可用会话时 `defaultSessionId` 为 `null`。用户可在工作台用需求工作区创建 DSH 会话并登记。
+
+节点推进时，下一节点沿用上一节点解析出的默认会话。
 
 ---
 
@@ -445,4 +451,3 @@ base_url: "http://127.0.0.1:8081"
 | `/api/requirements/{id}/nodes/**` | REQ-F4~F6、REQ-H5 |
 | `/api/requirements/{id}/sessions/**` | REQ-F7、REQ-X1、REQ-X2 |
 | `/internal/**` | REQ-F6、REQ-G1 |
-| `/api/fde-workbench/**`（插件 Host） | REQ-A3、REQ-F7 |

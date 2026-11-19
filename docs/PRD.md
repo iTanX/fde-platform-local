@@ -424,7 +424,7 @@ source: "docs/原始需求/Deepseek Harness 工作台.md"
 **AC-F7.4**
 - Given 某节点曾用过会话 A，之后新建了会话 B
 - When 再次打开该节点
-- Then 默认打开会话 B（节点绑定优先），仍可切换回会话 A
+- Then 默认打开会话 B（节点的最近一次显式选择优先），仍可切换回会话 A
 
 **AC-F7.5**
 - Given 关闭 DSH 后重开
@@ -537,7 +537,7 @@ source: "docs/原始需求/Deepseek Harness 工作台.md"
 **AC-X2.1**
 - Given 我在节点 N 并点击「新建会话」
 - When 创建完成
-- Then 新会话绑定到节点 N，且 `wb_requirement_node.primary_session_id` 被设为该会话（若为空）
+- Then 新会话归属本需求并设为节点 N 的默认会话，已有会话仍可切换
 
 **AC-X2.2**
 - Given 某人在节点 N 新建会话

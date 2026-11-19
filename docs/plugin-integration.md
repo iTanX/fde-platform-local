@@ -293,38 +293,14 @@ main 面板 children 声明 '{ workbench.node.chat: { kind: 'single', scope: 'se
 
 ---
 
-## 6. 会话路由与新建（Client 控制器 + Host 路由）
+## 6. 需求工作区和会话
 
-工作台页面与 DSH 会话服务在**同一个 React 树、同一个 Cordis 上下文**里（不再有 postMessage 桥），因此大部分会话操作在 Client 半直接完成：
+工作台通过 DSH Client 服务创建和恢复会话，在当前节点页嵌入 `conversation.content`。Java 保存需求、节点与 DSH 会话标识的关联。
 
-| 操作 | 执行位置 | 说明 |
-|---|---|---|
-| 解析默认会话 | Client `SessionController` + Java | 先查 Java 的节点绑定与会话列表 |
-| 新建会话 | Client `uiWorkspace.connectWorkspace` + Java 登记 | 见下方流程 |
-| 嵌入渲染 | Client `ctx.sessions.retain` + `conversation.content` | 见 §4.1.1 |
-
-Host 路由只在**需要跨进程**时使用：
-
-| 方法 | 路径 | 用途 |
-|---|---|---|
-| POST | `/api/fde-workbench/session/resolve` | 供 Java 侧（或未来外部入口）按需求解析默认会话 |
-| POST | `/api/fde-workbench/session/open` | 供外部入口直接打开某会话 |
-
-> Host 路由只接受同源请求（复用 `createWebRequestTrust`）；若需要 Java 直接调用，必须额外校验 `X-Internal-Token`。
-
-**新建会话流程（修正 M4，Client 侧完成）**：
-
-```text
-节点页点「新建会话」
-→ SessionController.create(requirementId, nodeInstanceId)
-   1) ctx.uiWorkspace.connectWorkspace(workspaceId) 得到 sessionId
-   2) POST /internal/sessions { dshSessionId, nodeId, title }        // 携带 X-Internal-Token
-      → Java 事务：写 wb_agent_session + wb_session_runtime_info
-                  + 若 node.primary_session_id 为空则设为新会话 + wb_node_session_link
-   3) 用 ctx.sessions.retain(sessionId) 得到引用，视图切换到新会话
-```
-
-节点推进后，下一节点的 `primary_session_id` **沿用需求默认会话**（不复制旧节点绑定，避免节点之间相互"抢"默认会话）；只有在该节点主动新建会话时才绑定到该节点。
+1. 打开可操作的当前节点时，Client 读取节点详情的 `workspacePath` 和 `defaultSessionId`，并获取本需求的会话列表。
+2. 点击「新建会话」时，Client 按 `workspacePath` 查找或创建 DSH 工作区，调用 `sessions.create({ workspaceId })` 新建会话，再用 JWT 调用 `POST /api/requirements/{id}/sessions` 登记。后端将新会话设为当前节点的默认会话。
+3. 用户切换已有会话时，Client 调用 `POST /api/sessions/{id}/touch` 保存选择，并用 `sessions.retain` 持有对应的会话引用。会话渲染见 §4.1.1。
+4. 推进时，Java 在同一个事务中将当前节点的有效默认会话保存到下一节点。重新打开工作台后，Client 根据节点详情返回的标识恢复会话。
 
 ---
 

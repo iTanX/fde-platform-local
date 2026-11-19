@@ -409,7 +409,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | `dsh web` 启动 + 授权链接换 cookie | ✅ 已验证 | 无 token → 401；带 `?token=` → 303 → 200，页面 `<title>DSH Local Build</title>` |
 | 侧栏入口「Web 工作台」 | ✅ 已验证 | 侧栏全局面板列表**第一项**（在「插件」之上），截图见验证记录 |
 | 工作台面板可打开 | ✅ 已验证 | 点击后中央区域显示「返回 / Web 工作台」标题栏与「节点会话」区 |
-| 面板内嵌入会话的消息流 / 输入框 | ❌ **未通过**（见 §10.1） | 面板显示会话 id 与标题，但会话内容区为空（`data-fde-workbench-embed` 未渲染，界面上也没有报错块） |
+| 面板内嵌入 DSH 原生会话 | ✅ 外壳已验证 | `edcb154` 修复了局部槽位接线。浏览器中可见原生输入框及模型选择器，工作区与多会话走查见 §10.1 |
 | Java 后端与 dsh 同时启动、一起停止 | ✅ 已验证 | `/api/health` → `{"db":"ok"}`；SIGTERM 后 3080 / 8081 均释放、无残留进程 |
 | `~/.dsh`、`~/.agents` 未被读写 | ✅ 已验证 | 安装与启动前后 `ls -la` 对比逐字节一致 |
 | 错误提示（端口占用 / 缺密码 / 未 setup / 非法参数） | ✅ 已验证 | 四种情况均输出对应中文提示且不启动一半进程 |
@@ -417,31 +417,6 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | 从零（空 pnpm store）的网络下载耗时 | ⚠️ 未实测 | 本机 store 已预热；冷启动预计 3~10 分钟 |
 | 跨机器整目录搬迁 `runtime/dsh` | ⚠️ 未实测 | 依赖同 OS/架构 |
 
-### 10.1 已知问题：面板内嵌会话内容为空（需插件侧修复）
+### 10.1 会话验证范围
 
-现象与定位（T0-4 实测，**与运行脚本无关**）：
-
-- 工作台面板能正常渲染：`data-fde-workbench-panel`、`data-fde-workbench-session-view`、
-  `data-fde-workbench-session-id` 都存在，且正确选出了一个会话 id。
-- 但会话视图里只有标题行（「节点会话 + 会话 id + 刷新会话列表」），其下的内容区高度 768 px、**0 个子节点**：
-  说明 `renderFactorySlot('workbench.node.chat', { reference })` 输出为空。
-- 没有 `data-fde-workbench-error`（不是插件自己的失败态分支），控制台也没有任何报错。
-- 对照：官方主会话页（未进工作台时）的输入框正常渲染，所以 `conversation.content` 本身可用。
-
-依据 `packages/client/ui-renderer/src/client/scoped-slots.tsx` 的 `FactoryOutlet` 实现，插件把**局部槽位名**
-当成工厂名调用了：
-
-```ts
-// fde-workbench-bundle/src/client/session/NodeSessionView.tsx（当前实现）
-return renderFactorySlot('workbench.node.chat.conversation' as 'workbench.node.chat', { reference }, { … })
-//                      ^ 这是局部槽位，不是工厂；host.factoryOf('…conversation') 未定义 → 返回 fallback（null）
-```
-
-工厂的根组件拿到的渲染能力一次只能渲染**一个工厂**（要么渲染别的工厂、要么用 `renderFactorySlot` 的
-`slots` 选项换掉它自己的局部槽位组件，不能退回来再渲染自己的局部槽位）。官方 `ui-subagent` 的写法是：
-外层注册一个局部槽位（`sidebar.chat.conversation`）由"宿主入口"渲染，槽位组件内部再 `renderFactorySlot('conversation.content', …)`，
-绕开了"工厂内部渲染自己的局部槽位"这一限制。
-
-修复方向（留给插件任务处理，不在 T0-4 范围内）：照搬官方 `sidebar-chat` 的两层结构——工作台面板里注册一个
-`main` 内的局部槽位承载 `SessionProvider` + `conversation.content`，而不是在 `workbench.node.chat` 工厂里
-再渲染 `workbench.node.chat.conversation`。
+会话内容区曾因槽位接线错误显示空白。`edcb154` 修复后，项目独立运行的 DSH Web 已验证可在面板内显示原生会话外壳。T5-3 另外验证了会话与节点信息之间的切换，页面地址保持不变。新建工作区会话、同需求内切换、跨节点恢复与配置模型后的消息发送仍需走查。
