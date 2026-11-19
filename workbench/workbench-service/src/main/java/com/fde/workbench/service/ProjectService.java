@@ -24,18 +24,19 @@ import java.util.List;
  * <ul>
  *   <li>列表只返回"我是成员"的项目；</li>
  *   <li>创建项目与写入 owner 成员记录在同一事务，保证不会出现"有项目无 owner"；</li>
- *   <li>详情要求成员（否则 403/10201，不泄露资源是否存在）；编辑/删除要求 owner（否则 403/10202）；</li>
+ *   <li>详情要求成员（否则 403/10201，不泄露资源是否存在）；编辑/删除要求 owner（否则 403/10202），
+ *       判定统一委托 {@link ProjectAccessService}（双源校验），本类不再自建权限逻辑；</li>
  *   <li>编辑/删除带 revision 乐观锁，冲突 409/10402。</li>
  * </ul>
  */
 @Service
 public class ProjectService {
 
-    /** 成员角色：owner */
-    public static final String ROLE_OWNER = "owner";
+    /** 成员角色：owner（值来源统一在 {@link ProjectAccessService#ROLE_OWNER}） */
+    public static final String ROLE_OWNER = ProjectAccessService.ROLE_OWNER;
 
-    /** 成员角色：普通成员 */
-    public static final String ROLE_MEMBER = "member";
+    /** 成员角色：普通成员（值来源统一在 {@link ProjectAccessService#ROLE_MEMBER}） */
+    public static final String ROLE_MEMBER = ProjectAccessService.ROLE_MEMBER;
 
     /** 项目简介最大长度（与 wb_project.description VARCHAR(1000) 一致） */
     private static final int MAX_DESCRIPTION_LENGTH = 1000;
@@ -46,12 +47,17 @@ public class ProjectService {
 
     private final CurrentUserContext currentUserContext;
 
+    /** 权限判定统一走 {@link ProjectAccessService}，不在本类重复实现成员/owner 规则 */
+    private final ProjectAccessService projectAccessService;
+
     public ProjectService(ProjectMapper projectMapper,
                           ProjectMemberMapper projectMemberMapper,
-                          CurrentUserContext currentUserContext) {
+                          CurrentUserContext currentUserContext,
+                          ProjectAccessService projectAccessService) {
         this.projectMapper = projectMapper;
         this.projectMemberMapper = projectMemberMapper;
         this.currentUserContext = currentUserContext;
+        this.projectAccessService = projectAccessService;
     }
 
     /**
@@ -118,8 +124,8 @@ public class ProjectService {
      */
     public ProjectWithStats detail(Long projectId) {
         Long userId = currentUserContext.require().userId();
-        ProjectWithStats project = requireExistingProject(projectId);
-        requireMember(projectId, userId);
+        ProjectWithStats project = projectAccessService.requireExistingProject(projectId);
+        projectAccessService.requireMember(projectId, userId);
         return project;
     }
 
@@ -136,11 +142,9 @@ public class ProjectService {
     @Transactional
     public ProjectWithStats update(Long projectId, String name, String description, Integer revision) {
         CurrentUser login = currentUserContext.require();
-        ProjectWithStats project = requireExistingProject(projectId);
-        // 先判成员再判 owner：非成员一律 10201，符合 api.md §1.5 权限记号与 PRD AC-H2.2
-        requireMember(projectId, login.userId());        if (!isOwner(project, login.userId())) {
-            throw BizException.of(ErrorCode.FORBIDDEN, "只有项目 owner 可以编辑项目");
-        }
+        // 先判成员再判 owner：非成员一律 10201，符合 api.md §1.6 权限记号与 PRD AC-H2.2。
+        // 双源校验与"非 owner → 10202"统一由 ProjectAccessService 负责。
+        projectAccessService.requireOwner(projectId, login.userId());
         String trimmedName = name == null ? "" : name.trim();
         if (trimmedName.isEmpty()) {
             throw BizException.of(ErrorCode.PARAM_INVALID, "项目名称不能为空");
@@ -150,7 +154,7 @@ public class ProjectService {
                 normalizeDescription(description), revision, LocalDateTime.now());
         if (affected == 0) {
             // 更新 0 行只有两种原因：版本号不是最新（乐观锁冲突）或期间被删除
-            requireExistingProject(projectId);
+            projectAccessService.requireExistingProject(projectId);
             throw BizException.of(ErrorCode.REVISION_CONFLICT, "项目已被他人修改，请刷新后重试");
         }
         return projectMapper.selectById(projectId);
@@ -168,62 +172,13 @@ public class ProjectService {
      */
     @Transactional
     public void delete(Long projectId, Integer revision) {
-        CurrentUser login = currentUserContext.require();
-        ProjectWithStats project = requireExistingProject(projectId);
-        requireMember(projectId, login.userId());
-        if (!isOwner(project, login.userId())) {
-            throw BizException.of(ErrorCode.FORBIDDEN, "只有项目 owner 可以删除项目");
-        }
+        Long userId = currentUserContext.require().userId();
+        projectAccessService.requireOwner(projectId, userId);
         int affected = projectMapper.markDeleted(projectId, revision, LocalDateTime.now());
         if (affected == 0) {
-            requireExistingProject(projectId);
+            projectAccessService.requireExistingProject(projectId);
             throw BizException.of(ErrorCode.REVISION_CONFLICT, "项目已被他人修改，请刷新后重试");
         }
-    }
-
-    /**
-     * owner 判定：以 {@code wb_project.owner_id} 为准，并额外确认成员表里确有 owner 记录。
-     * <p>
-     * 之所以两者都要：owner_id 是项目表上的冗余字段，成员表 role 才是成员管理的权威数据；
-     * 二者是应用保证的强一致性，校验双保险可避免"数据被人工改动"后越权。
-     *
-     * @param project 项目实体
-     * @param userId  当前用户
-     * @return true 表示 owner
-     */
-    private boolean isOwner(Project project, Long userId) {
-        if (!userId.equals(project.getOwnerId())) {
-            return false;
-        }
-        ProjectMember member = projectMemberMapper.selectByProjectAndUser(project.getId(), userId);
-        return member != null && ROLE_OWNER.equals(member.getRole());
-    }
-
-    /**
-     * 成员判定：成员表存在记录即可访问。
-     *
-     * @param projectId 项目 ID
-     * @param userId    当前用户
-     * @throws BizException 非成员 → 403/10201
-     */
-    private void requireMember(Long projectId, Long userId) {
-        if (projectMemberMapper.selectByProjectAndUser(projectId, userId) == null) {
-            throw BizException.of(ErrorCode.NOT_PROJECT_MEMBER, "你不是该项目成员");
-        }
-    }
-
-    /**
-     * 取未删除的项目（含统计列），不存在直接 404。
-     *
-     * @param projectId 项目 ID
-     * @return 项目实体
-     */
-    private ProjectWithStats requireExistingProject(Long projectId) {
-        ProjectWithStats project = projectMapper.selectById(projectId);
-        if (project == null) {
-            throw BizException.of(ErrorCode.NOT_FOUND, "项目不存在");
-        }
-        return project;
     }
 
     /**

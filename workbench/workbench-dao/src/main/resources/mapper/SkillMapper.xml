@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  技能表 wb_skill / 技能版本表 wb_skill_version 的 SQL（T1-2 只包含"移除成员时清理技能"所需语句）。
+
+  外键关系（docs/database/001_init.sql §10，全部 RESTRICT）：
+    wb_skill_version.skill_id      → wb_skill.id            （fk_skill_version_skill）
+    wb_workflow_node_skill.skill_id → wb_skill.id           （fk_node_skill_skill）
+  因此删除顺序必须是：版本 → 技能；若技能仍被流程节点引用，删除会抛外键错误，
+  由 ProjectMemberService 捕获后整体回滚并返回可读提示。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.SkillMapper">
+
+    <select id="countByProjectAndCreator" resultType="long">
+        SELECT COUNT(*)
+          FROM wb_skill
+         WHERE project_id = #{projectId}
+           AND created_by = #{createdBy}
+    </select>
+
+    <!-- 版本先删：子表 RESTRICT，父表技能行还在时不能被单独删除 -->
+    <delete id="deleteVersionsByProjectAndCreator">
+        DELETE v
+          FROM wb_skill_version v
+          JOIN wb_skill s ON s.id = v.skill_id
+         WHERE s.project_id = #{projectId}
+           AND s.created_by = #{createdBy}
+    </delete>
+
+    <delete id="deleteByProjectAndCreator">
+        DELETE FROM wb_skill
+         WHERE project_id = #{projectId}
+           AND created_by = #{createdBy}
+    </delete>
+
+</mapper>

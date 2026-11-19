@@ -16,6 +16,17 @@
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
+    <!-- 成员列表投影：成员记录 + 用户展示信息（只取列表需要的列，不把 password_hash 带出 DB 层） -->
+    <resultMap id="ProjectMemberDetailMap" type="com.fde.workbench.dao.entity.ProjectMemberDetail">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="username" column="username"/>
+        <result property="displayName" column="display_name"/>
+        <result property="role" column="role"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
     <select id="selectByProjectAndUser" resultMap="ProjectMemberMap">
         SELECT id, project_id, user_id, role, created_at
           FROM wb_project_member
@@ -23,10 +34,33 @@
            AND user_id = #{userId}
     </select>
 
+    <!-- owner 置顶（role='owner' 排 0），其余按加入时间与 ID 升序，保证列表顺序稳定 -->
+    <select id="selectByProject" resultMap="ProjectMemberDetailMap">
+        SELECT m.id, m.project_id, m.user_id, m.role, m.created_at,
+               u.username, u.display_name
+          FROM wb_project_member m
+          JOIN wb_user u ON u.id = m.user_id
+         WHERE m.project_id = #{projectId}
+         ORDER BY CASE WHEN m.role = 'owner' THEN 0 ELSE 1 END, m.created_at, m.user_id
+    </select>
+
     <insert id="insert" parameterType="com.fde.workbench.dao.entity.ProjectMember"
             useGeneratedKeys="true" keyProperty="id" keyColumn="id">
         INSERT INTO wb_project_member (project_id, user_id, role, created_at)
         VALUES (#{projectId}, #{userId}, #{role}, #{createdAt})
     </insert>
+
+    <update id="updateRole">
+        UPDATE wb_project_member
+           SET role = #{role}
+         WHERE project_id = #{projectId}
+           AND user_id = #{userId}
+    </update>
+
+    <delete id="deleteByProjectAndUser">
+        DELETE FROM wb_project_member
+         WHERE project_id = #{projectId}
+           AND user_id = #{userId}
+    </delete>
 
 </mapper>

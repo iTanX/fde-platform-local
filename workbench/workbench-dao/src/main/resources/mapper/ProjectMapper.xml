@@ -90,6 +90,20 @@
            AND deleted = 0
     </update>
 
+    <!--
+      转让 owner：同样走 revision 乐观锁。
+      成员表 role 的变更由 Service 在同一事务内完成；两处一起提交，避免出现"两个 owner"或"无人可管"。
+    -->
+    <update id="updateOwnerWithRevision">
+        UPDATE wb_project
+           SET owner_id = #{newOwnerId},
+               revision = revision + 1,
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND revision = #{revision}
+           AND deleted = 0
+    </update>
+
     <!-- 逻辑删除：deleted=1 而非物理删除，避免破坏外键链上的其他业务数据 -->
     <update id="markDeleted">
         UPDATE wb_project

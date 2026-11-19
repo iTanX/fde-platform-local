@@ -75,6 +75,23 @@ public interface ProjectMapper {
                            @Param("updatedAt") LocalDateTime updatedAt);
 
     /**
+     * 按 revision 乐观锁变更 owner。
+     * <p>
+     * 仅转让（T1-2）使用：必须与"成员表 role 变更"在同一事务内调用，两处任一步失败整体回滚。
+     * 带 revision 条件，避免"读到旧版本就转让"覆盖别人刚完成的转让或编辑。
+     *
+     * @param id         项目 ID
+     * @param newOwnerId 新 owner 用户 ID
+     * @param revision   提交时携带的版本号
+     * @param updatedAt  更新时间（应用写入）
+     * @return 影响行数（1 成功，0 冲突）
+     */
+    int updateOwnerWithRevision(@Param("id") Long id,
+                                @Param("newOwnerId") Long newOwnerId,
+                                @Param("revision") Integer revision,
+                                @Param("updatedAt") LocalDateTime updatedAt);
+
+    /**
      * 逻辑删除：{@code deleted=1}、{@code revision+1}。
      * <p>
      * 带上 {@code revision} 条件，避免"别人刚改完就被删"的覆盖；0 行同样由 Service 区分原因。
