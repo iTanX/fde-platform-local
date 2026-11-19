@@ -4,24 +4,29 @@
  * 依据 plugin-integration.md §4.1.1，只使用官方公开扩展点：
  * 1. `ctx.sessions.retain(sessionId, { source })` 取得会话引用（任意 SessionId，不限子会话）；
  * 2. `<SessionProvider session={reference}>` 声明会话作用域；
- * 3. `renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, { slots: { views } })`
+ * 3. `renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, { slots: { views: FixedChatView } })`
  *    渲染官方会话内容工厂（输入框、消息流、工具卡片、运行状态全部由 DSH 自己渲染，
  *    所以「可输入 / 可滚动 / Esc Esc 停止」这些原生快捷键保持生效）；
  * 4. `views` 局部槽位固定选 Chat 视图（与 ui-subagent 的官方先例 sidebar-chat 完全一致）。
  *
- * 为什么用「自建工厂」承载：
- *   `renderFactorySlot` 只有在*工厂定义*内部调用时才拿到正确的槽位归属（`boundRenderFactorySlot(definition)`），
- *   普通 entry 拿到的 renderFactorySlot 绑定在 entry 上，去渲染 `conversation.content` 会被槽位归属校验拒绝。
- *   官方 sidebar-chat 的做法是：在会话作用域声明一个单槽位（`sidebar.chat.conversation`），
- *   其组件用 `renderSlot` 渲染，再由该槽位里的组件调用 `conversation.content` 工厂。
- *   这里照搬同一结构，改用本插件自己的工厂 `workbench.node.chat`（输入 `{ reference }`）。
+ * 为什么由「会话作用域槽位」承载（而不是自建工厂）：
+ *   `renderFactorySlot` 由渲染框架按**注册项**发放（`boundRenderFactorySlot(entry)`），
+ *   任何槽位组件拿到的都绑定在自己的注册项上，所以真正的归属校验是
+ *   `FactoryOutlet` 去 `host.factoryOf(name)` 查**工厂定义**是否存在：
+ *   - 工厂根里回头渲染自己的局部槽位名（旧写法 `'workbench.node.chat.conversation'`），
+ *     `factoryOf()` 查不到 → `if (definition === undefined) return <>{fallback ?? null}</>`，
+ *     无报错、无内容，这就是面板空白的原因；
+ *   - 在槽位组件里渲染 `'conversation.content'`，`factoryOf()` 能查到官方工厂，正常渲染。
+ *   结构照搬官方 ui-subagent（`sidebar-chat/index.tsx` 的 `registerSidebarChat()`）：
+ *   外层注册项声明会话子槽位 → 内层槽位注册项的组件（官方叫 `ConversationSlotPanel`，
+ *   这里叫 `WorkbenchConversationPanel`）里 `<SessionProvider>` + 调 `conversation.content` 工厂。
  *
  * 失败态：拿不到会话 / retain 抛错时，只在本区域内显示错误与「新建会话」「重试」，绝不白屏。
  */
 import { useCallback, useEffect, useState } from 'react'
-import type { ISessions, SessionReference, SessionRetainOptions, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { ISessions, SessionReference, SessionRetainOptions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { RenderFactorySlot, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsRenderFactories, PropsRenderSlots, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 
 /** 工作台命名空间的翻译函数类型（key 域来自声明的字典）。 */
 export type WorkbenchTranslate = TranslateNS<'workbench'>
@@ -38,11 +43,14 @@ export interface SessionHost {
   readonly sessions: Pick<ISessions, 'list' | 'retain' | 'refresh'>
 }
 
-/** 本插件工厂 `workbench.node.chat` 的输入。 */
-export interface NodeChatInput {
+/** 本插件嵌入槽位 `workbench.node.chat` 的 owner 参数（由外层 `renderSlot` 在渲染点传入）。 */
+export interface NodeChatOwnerProps {
   /** 要嵌入的会话引用（由调用方 retain，本组件不负责释放）。 */
   readonly reference: SessionReference
 }
+
+// 槽位 owner 参数的单一来源：SlotMap 里用 `owner: NodeChatOwnerProps` 声明过，
+// 这里再取一次交给 renderSlot 的 owner 形参类型（值相等，保证两处不会漂移）。
 
 /** 嵌入视图的文案与依赖。 */
 export interface NodeSessionViewProps {
@@ -52,8 +60,11 @@ export interface NodeSessionViewProps {
   readonly host: SessionHost
   /** 新建会话（走官方 ctx.uiWorkspace.startSession）。 */
   readonly onCreateSession: () => void
-  /** 由渲染框架注入：渲染本插件声明的工厂槽位。 */
-  readonly renderFactorySlot: (name: 'workbench.node.chat', input: NodeChatInput) => React.ReactNode
+  /**
+   * 由渲染框架注入：渲染本插件声明的槽位 `workbench.node.chat`。
+   * 注意它渲染的是**槽位**（kind: 'single'），不是工厂（旧写法误把它当工厂名用）。
+   */
+  readonly renderSlot: (name: 'workbench.node.chat', owner: NodeChatOwnerProps) => React.ReactNode
 }
 
 /** 会话解析结果。 */
@@ -96,9 +107,9 @@ function Notice({ children }: { readonly children: React.ReactNode }) {
 
 /**
  * 节点页「会话」视图（冒烟版）。
- * @param props - 翻译函数、会话宿主、新建会话回调与工厂槽位渲染能力。
+ * @param props - 翻译函数、会话宿主、新建会话回调与子槽位渲染能力。
  */
-export function NodeSessionView({ t, host, onCreateSession, renderFactorySlot }: NodeSessionViewProps) {
+export function NodeSessionView({ t, host, onCreateSession, renderSlot }: NodeSessionViewProps) {
   const { sessions } = host
   const [state, setState] = useState<ResolveState>({ kind: 'loading' })
   const [reference, setReference] = useState<SessionReference | undefined>(undefined)
@@ -191,20 +202,14 @@ export function NodeSessionView({ t, host, onCreateSession, renderFactorySlot }:
           )
           : null}
         {state.kind === 'ready' && reference !== undefined
-          ? renderFactorySlot('workbench.node.chat', { reference })
+          ? renderSlot('workbench.node.chat', { reference })
           : null}
       </div>
     </div>
   )
 }
 
-/** 嵌进工厂里的会话内容（`conversation.content` 的调用方）。 */
-export interface NodeChatConversationProps extends NodeChatInput, NodeChatSeat {
-  /** 渲染 `conversation.content` 工厂。 */
-  readonly renderFactorySlot: RenderFactorySlot
-}
-
-/** 固定 Chat 视图（与官方 sidebar-chat 同款）。 */
+/** 固定 Chat 视图（与官方 sidebar-chat 的 FixedChatConversationView 同款）。 */
 function FixedChatView(props: {
   readonly renderSlot: (key: 'conversation.session', owner: { view: 'chat' }) => React.ReactNode
 }) {
@@ -212,49 +217,63 @@ function FixedChatView(props: {
 }
 
 /**
- * 工厂发生体的根：把作用域座席转交给局部槽位组件，由它渲染会话内容。
- * 这样 `conversation.content` 的调用者就是本插件工厂的局部槽位组件（归属校验通过），
- * 与官方 ui-subagent 的 `sidebar.chat.conversation` 结构一致。
- * @param props - 作用域座席 + 工厂渲染能力。
+ * 外层槽位 `workbench.node.chat` 的组件（官方 `SidebarChatTab` 的角色）：
+ * 只负责「绑定会话引用 + 渲染会话内容座席」，本身不碰 conversation.content。
+ *
+ * props 来自 `PropsRuntime<'workbench.node.chat'>`（会话作用域座席 + owner 参数）
+ * 与 `PropsRenderSlots<'workbench.node.chat.conversation'>`（自声明子槽位的 renderSlot
+ * 与 SessionProvider 座位）。**SessionProvider 只能从 PropsRenderSlots 拿到**：
+ * 它由渲染框架在「注册项声明了非 root 子槽位」时注入，官方 SidebarChatTabProps 同款写法。
  */
-export function NodeChatListConversation(props: NodeChatListConversationProps) {
-  const { reference, renderFactorySlot } = props
-  // 局部槽位名由 Factory 声明提供，不属于 SlotFactoryMap；这里的 key 域类型只收 Factory 名，
-  // 因此把这个合法的局部槽位键显式断言一次（运行期由 renderFactorySlot 校验归属）。
-  return renderFactorySlot('workbench.node.chat.conversation' as 'workbench.node.chat', {
-    reference,
-  }, { slots: { conversation: NodeChatConversation as (props: unknown) => React.ReactNode } })
-}
+export type WorkbenchChatShellProps = PropsRuntime<'workbench.node.chat'>
+  & PropsRenderSlots<'workbench.node.chat.conversation'>
 
-/** `workbench.node.chat.conversation` 局部槽位组件的 props：作用域座席 + 引用 + 工厂能力。 */
-export type NodeChatListConversationProps = NodeChatInput & NodeChatSeat & {
-  /** 渲染局部槽位 `workbench.node.chat.conversation`。 */
-  readonly renderFactorySlot: RenderFactorySlot
-}
-
-/** 会话作用域座席（由渲染框架按作用域注入）。 */
-interface NodeChatSeat {
-  readonly useSession: (selector: (value: SessionSnapshot) => unknown) => unknown
-  readonly useConversation: (selector: (value: { readonly activeTargets: ReadonlySet<unknown> }) => unknown) => unknown
-  readonly useSessions: (selector: (state: { readonly byId: Record<string, { readonly blank?: boolean }> }) => unknown) => unknown
-  readonly SessionProvider: (props: { readonly session: SessionReference; readonly children: React.ReactNode }) => React.ReactNode
+/**
+ * 会话外壳：`<SessionProvider session={reference}>` 把外层传进来的会话引用绑定成会话作用域，
+ * 再渲染内容座席。宽度/高度撑满，交给 conversation.content 自己滚动。
+ * @param props - 会话座席（SessionProvider / renderSlot）+ owner 参数（reference）。
+ */
+export function WorkbenchChatShell({ reference, SessionProvider, renderSlot }: WorkbenchChatShellProps) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, height: '100%' }}>
+      <SessionProvider session={reference}>
+        {renderSlot('workbench.node.chat.conversation', {})}
+      </SessionProvider>
+    </div>
+  )
 }
 
 /**
- * 渲染官方 `conversation.content` 工厂（variant = 'embedded'）。
- * @param props - 会话引用、会话作用域座席与工厂渲染能力。
+ * 会话内容座席 `workbench.node.chat.conversation` 的组件（官方 `ConversationSlotPanel` 的角色）：
+ * 在**会话作用域槽位组件**里直接渲染官方 `conversation.content` 工厂（variant = 'embedded'）。
+ *
+ * 为什么这里调 `renderFactorySlot` 合法（详见文件头）：归属校验是
+ * `FactoryOutlet` 去 `host.factoryOf('conversation.content')` 查工厂定义，
+ * 该工厂由 ui-conversation 注册，存在 → 正常渲染。
+ * 旧写法把**局部槽位名** `workbench.node.chat.conversation` 当工厂名传进去，
+ * `factoryOf()` 返回 undefined → `return <>{fallback ?? null}</>` → 无报错、无内容的空白区。
+ *
+ * props：`PropsRuntime<'workbench.node.chat.conversation'>` 给会话座席
+ * （sessionId / useSession / useConversation / useSessions），`PropsRenderFactories` 给 renderFactorySlot。
  */
-export function NodeChatConversation(props: NodeChatConversationProps) {
-  const { reference, useSession, useConversation, useSessions, SessionProvider, renderFactorySlot } = props
-  const session = useSession((value: SessionSnapshot) => value) as SessionSnapshot
-  const activeTargets = useConversation(value => value.activeTargets) as ReadonlySet<unknown>
-  // §4.1.1 第 2 条：与主面板同规则 —— 有活跃目标 / 已有内容 / 正在运行 → active；
-  // 加载中 → settling；新建空白会话 → hero。
-  const active = activeTargets.size > 0
+export type WorkbenchConversationPanelProps = PropsRuntime<'workbench.node.chat.conversation'>
+  & PropsRenderFactories
+
+/**
+ * 渲染官方 `conversation.content` 工厂（variant = 'embedded'）。
+ * @param props - 会话座席与工厂渲染能力。
+ */
+export function WorkbenchConversationPanel(props: WorkbenchConversationPanelProps) {
+  const { sessionId, useSession, useConversation, useSessions, renderFactorySlot } = props
+  const session = useSession(value => value)
+  const conversation = useConversation(value => value)
+  // §4.1.1 第 2 条：与主面板 `ConversationMainPanel` 完全同一套规则 ——
+  // 有活跃目标 / 已有内容 / 正在运行 → active；加载中 → settling；新建空白会话 → hero。
+  const active = conversation.activeTargets.size > 0
     || (!session.blank && !session.awaitingFirstTurn)
     || session.running
   const shellPhase = active ? 'active' : session.promptAttempted ? 'engaging' : 'blank'
-  const summaryBlank = useSessions(state => state.byId[session.sessionId]?.blank) as boolean | undefined
+  const summaryBlank = useSessions(state => state.byId[sessionId]?.blank)
   const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true
   const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true)
   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
@@ -268,11 +287,9 @@ export function NodeChatConversation(props: NodeChatConversationProps) {
       data-embed-open-state={session.openState}
       style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, height: '100%' }}
     >
-      <SessionProvider session={reference}>
-        {renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, {
-          slots: { views: FixedChatView },
-        })}
-      </SessionProvider>
+      {renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero }, {
+        slots: { views: FixedChatView },
+      })}
     </div>
   )
 }

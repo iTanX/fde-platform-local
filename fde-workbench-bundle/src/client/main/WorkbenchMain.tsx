@@ -7,7 +7,7 @@
  */
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { NodeSessionView, type NodeChatInput, type SessionHost } from '../session/NodeSessionView.tsx'
+import { NodeSessionView, type NodeChatOwnerProps, type SessionHost } from '../session/NodeSessionView.tsx'
 
 /** 工作台面板的注入参数：全部来自 `ctx`，组件内不读浏览器全局。 */
 export interface WorkbenchMainInjected {
@@ -19,17 +19,24 @@ export interface WorkbenchMainInjected {
   readonly createSession: () => void
 }
 
-/** 工作台外壳 props：`main` 槽位运行期参数 + 注入参数 + 本插件命名空间的 `t` + 工厂槽位渲染能力。 */
+/** 工作台外壳 props：`main` 槽位运行期参数 + 注入参数 + 本插件命名空间的 `t` + 子槽位渲染能力。 */
 export type WorkbenchMainProps = PropsRuntime<'main'>
   & WorkbenchMainInjected
   & PropsLocale<'workbench'>
-  & { readonly renderFactorySlot: (name: 'workbench.node.chat', input: NodeChatInput) => React.ReactNode }
+  & {
+    /**
+     * 渲染本面板在 children 里声明的 `workbench.node.chat` 槽位（会话作用域）。
+     * 旧写法用的是 `renderFactorySlot('workbench.node.chat', …)`，但 `workbench.node.chat`
+     * 当时是「工厂 + 局部槽位」的结构，真正被渲染的局部槽位名工厂不存在 → 静默 null。
+     */
+    readonly renderSlot: (name: 'workbench.node.chat', owner: NodeChatOwnerProps) => React.ReactNode
+  }
 
 /**
  * 渲染工作台外壳。
- * @param props - 槽位参数、注入参数、翻译函数与工厂槽位渲染能力。
+ * @param props - 槽位参数、注入参数、翻译函数与子槽位渲染能力。
  */
-export function WorkbenchMain({ t, layout, sessionHost, createSession, renderFactorySlot }: WorkbenchMainProps) {
+export function WorkbenchMain({ t, layout, sessionHost, createSession, renderSlot }: WorkbenchMainProps) {
   // 「返回」= 取消面板选择；ui-layout 切回当前会话。selectPanel 只对未注册 id 抛错，
   // 传 null 永远安全，所以这里不需要 try/catch。
   const onBack = (): void => {
@@ -90,7 +97,7 @@ export function WorkbenchMain({ t, layout, sessionHost, createSession, renderFac
             t={t}
             host={sessionHost}
             onCreateSession={createSession}
-            renderFactorySlot={renderFactorySlot}
+            renderSlot={renderSlot}
           />
         </div>
       </div>
