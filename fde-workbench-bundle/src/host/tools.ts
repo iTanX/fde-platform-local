@@ -39,10 +39,23 @@ import type { NodeDirectory } from './workbench.ts'
 import type { Settings } from './settings.ts'
 
 /** 三个工具共用的选择条件（显式 `undefined` 表示"用当前节点"）。 */
-interface NodeSelection {
+export interface NodeSelection {
   /** 模型显式给出的节点实例 ID。 */
   nodeInstanceId: number | undefined
 }
+
+/**
+ * 定位钩子（<b>只给离线验证脚本用</b>，生产代码不读写）。
+ *
+ * 为什么要有它：验证脚本要断言"不给 nodeInstanceId 时，定位当前节点只发 1 次节点清单 +
+ * 1 次 `/context`，且推进后缓存会失效"，这些行为藏在 `registerTools` 的闭包里，从外部拿不到实例。
+ * 把注册时的 `locate` 与 `directory.invalidate`（推进后调用的同一个入口）暴露出来，
+ * 让脚本能像工具那样走一遍真实的定位路径。这是唯一的测试接缝，不改变工具行为。
+ */
+export const locateHooks: {
+  locate?: (selection: NodeSelection, exec: ToolRunContext) => Promise<NodeContext>
+  invalidate?: (requirementId: number) => void
+} = {}
 
 /**
  * 结果信封（所有工具统一）。
@@ -214,6 +227,9 @@ export function registerTools(ctx: Context, options: RegisterToolsOptions): void
     }
     return context
   }
+  // 供离线验证脚本使用（见 locateHooks 的注释）：转成验证脚本的调用形状，不改变工具行为
+  locateHooks.locate = async (selection, exec) => await locate(exec, selection, false)
+  locateHooks.invalidate = (requirementId: number) => { directory.invalidate(requirementId) }
 
   // ------------------------------------------------------------------ 1. node_context_get
   ctx.tools.register(defineTool({

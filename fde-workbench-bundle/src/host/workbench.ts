@@ -3,26 +3,38 @@
  *
  * 为什么需要它：工具入参里的 `nodeInstanceId` 是可选的，而
  * `GET /internal/nodes/{nid}/context` 只认节点实例 ID——"当前节点是哪个"必须有人记住。
- * 记住的方式：**会话(agent) + cwd → requirementId → 节点上下文（缓存）**。
+ * 记住的方式：**会话(agent) + cwd → requirementId → 当前节点上下文（缓存）**。
  *
- * 当前节点的三个来源（按优先级）：
+ * 当前节点的来源（按优先级）：
  *   1. 模型显式给的 `nodeInstanceId`（最可信，多会话并行时唯一安全）；
- *   2. 该需求的缓存（上一次 `/context` 的结果；节点推进后由工具调用 `invalidate` 失效）；
- *   3. `<ws>/.workbench/<nid>/` ——模型输出目录，只有"有人在这个节点上工作过"才会存在，
- *      是当前节点最可靠的本地证据。候选里取"正在办理"的那个。
+ *   2. 该需求的缓存（上一次解析出的节点上下文；节点推进后由工具调用 `invalidate` 失效）；
+ *   3. **后端给出的节点清单**（`GET /internal/requirements/{rid}/nodes`）：一次拿到该需求全部
+ *      节点实例的 id / seq / name / status，从中选当前节点，再取它的 `/context` 快照。
+ *
+ * 为什么不用"本地 `.workbench/<nid>/` 目录 + 逐步探测节点 ID"的旧做法：那是节点清单接口出现前的
+ * 临时方案，有两个根本问题——(a) 请求量大：新需求 / 新节点还没有本地输出目录时，要从需求 ID 起
+ * 连续试探最多 256 个节点 ID，每个都是一次 `GET /context`，绝大多数必然 404；(b) 语义不清：
+ * "节点实例 ID 紧跟在需求 ID 之后、落在一段窗口内"是依赖自增主键相邻的巧合事实，不是契约，
+ * 一旦 ID 分配方式变化（批量导入、其它表插入交错）就会静默失败，且失败时只能报"找不到当前节点"。
+ * 现在由后端按需求直接回答，请求数固定为 1 次清单 + 1 次上下文，且不再依赖任何 ID 规律。
  *
  * 一个需求一个 workspace（docs/plugin-integration.md §5.1），节点在需求内串行，
  * 所以缓存不会把两个节点搞混；真要跨节点操作，显式传 `nodeInstanceId` 即可。
  */
 
-import { readdir } from 'node:fs/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { BackendClient } from './backend.ts'
-import type { NodeContext } from './backend.ts'
-import { MODEL_DIR, WS_DIR, parseWorkspaceCwd } from './paths.ts'
+import type { NodeBrief, NodeContext } from './backend.ts'
+import { WS_DIR, parseWorkspaceCwd } from './paths.ts'
 import type { Settings } from './settings.ts'
+
+/** 节点状态里的"当前节点"（与后端 `RequirementNode.STATUS_CURRENT` 一致）。 */
+const STATUS_CURRENT = 'current'
+
+/** 节点状态里的"已完成"（与后端 `RequirementNode.STATUS_DONE` 一致）。 */
+const STATUS_DONE = 'done'
 
 /**
  * 节点目录：需求 → 当前节点上下文。
@@ -93,7 +105,7 @@ export class NodeDirectory {
     }
     const cached = this.cache.get(requirementId)
     if (cached !== undefined) return cached
-    const discovered = await this.discoverCurrentNode(requirementId, cwd ?? resolveWorkspace(this.settings.storageRoot, requirementId), signal)
+    const discovered = await this.locateCurrentNode(requirementId, signal)
     this.remember(discovered)
     return discovered
   }
@@ -110,8 +122,7 @@ export class NodeDirectory {
   async resolveNodeByRequirement(requirementId: number, signal?: AbortSignal): Promise<NodeContext | undefined> {
     const cached = this.cache.get(requirementId)
     if (cached !== undefined) return cached
-    const workspace = resolveWorkspace(this.settings.storageRoot, requirementId)
-    const discovered = await this.discoverCurrentNode(requirementId, workspace, signal).catch(() => undefined)
+    const discovered = await this.locateCurrentNode(requirementId, signal).catch(() => undefined)
     if (discovered !== undefined) this.remember(discovered)
     return discovered
   }
@@ -133,64 +144,61 @@ export class NodeDirectory {
   }
 
   /**
-   * 没有 nodeInstanceId 时推断"当前节点"。
+   * 没有 nodeInstanceId 时定位"当前节点"：先按需求拉一次节点清单，再取选中节点的上下文。
    *
-   * 后端 `/context` 只接受节点实例 ID，没有"按需求查节点"的内部接口，
-   * 因此这里用两条线索拼接（都不需要模型猜）：
-   *   1. 本地的 `.workbench/<nid>/`（模型输出目录）：模型写过东西就一定有，最可靠；
-   *   2. 若本地还没有：**探测节点实例 ID**——同一需求创建的节点 ID 相连，
-   *      从需求 ID 起找一段窗口，逐个问 `/context`，只要返回的 `requirementId` 就是本需求就收下。
-   * 候选里优先返回"正在办理（current）"的那个；都确认不了就抛可读错误，让模型显式传 ID。
-   * @param requirementId - 需求 ID
-   * @param workspace - workspace 绝对路径（cwd 或按存储根拼出）
+   * 选法（与工作台页面口径一致）：
+   *   1. 优先 `status === 'current'` 的节点——需求进行中时它就是要办理的节点；
+   *   2. 需求已完成时没有 current 节点，取**最后一个** `done` 节点，让模型在只读状态下
+   *      仍能看到"最后一环"的产出与上下文（后端会把 `readonly` 置为 true，只读由后端判定）；
+   *   3. 两者都没有（理论上不会出现：清单来自同一份数据）→ 明确报错，让模型显式传 ID，
+   *      **不**回退到任何猜测式探测。
+   *
+   * 失败处理：清单请求失败时抛出带后端原因的中文错误——静默吞掉会退化成"找不到节点"，
+   * 把"后端不可用 / 令牌不对 / 需求已删除"这些真实原因掩盖掉，模型与用户都无从下手。
+   *
+   * @param requirementId - 需求 ID（来自会话 cwd）
    * @param signal - 取消信号
-   * @returns 节点上下文
+   * @returns 选中节点的上下文（workspace 以后端为准）
    * @throws Error 中文可读错误
    */
-  private async discoverCurrentNode(requirementId: number, workspace: string, signal?: AbortSignal): Promise<NodeContext> {
-    const modelDir = `${workspace.replace(/[\\/]+$/, '')}/${MODEL_DIR}`
-    const entries = await readdir(modelDir, { withFileTypes: true }).catch(() => [])
-    const local = modelDirNames(entries.filter(entry => entry.isDirectory()).map(entry => entry.name))
-    const checked: string[] = []
-    const confirmed: NodeContext[] = []
-    for (const id of local) {
-      const context = await this.tryContext(id, requirementId, signal)
-      if (context === undefined) continue
-      checked.push(`#${id}「${context.nodeName}」${context.nodeStatus}`)
-      if (context.nodeStatus === 'current') return context
-      confirmed.push(context)
+  private async locateCurrentNode(requirementId: number, signal?: AbortSignal): Promise<NodeContext> {
+    let listing
+    try {
+      listing = await this.client.requirementNodes(requirementId, signal)
+    } catch (error) {
+      throw new Error(
+        `无法获取需求 ${requirementId} 的节点列表：${errorText(error)}。`
+        + '请确认后端已启动、插件 internalToken 正确，且该需求仍然存在。'
+        + '也可以先在工作台节点页确认节点，再调用时显式给出 nodeInstanceId。',
+      )
     }
-    // 本地还没有输出目录（新需求/新节点）→ 探测节点实例 ID
-    for (const id of probeWindow(requirementId)) {
-      if (local.includes(id)) continue
-      const context = await this.tryContext(id, requirementId, signal)
-      if (context === undefined) continue
-      checked.push(`#${id}「${context.nodeName}」${context.nodeStatus}`)
-      if (context.nodeStatus === 'current') return context
-      confirmed.push(context)
-    }
-    if (confirmed.length > 0) return confirmed[0] as NodeContext
-    throw new Error(
-      `无法确定需求 ${requirementId} 的当前节点。`
-      + (checked.length > 0 ? `已检查的节点：${checked.join('、')}。` : '该需求下没有找到可用的节点。')
-      + '请在调用时给出 nodeInstanceId（工作台节点页可见）。',
-    )
+    const chosen = this.pickCurrentNode(requirementId, listing.nodes, listing.requirementStatus)
+    return await this.client.nodeContext(chosen.nodeInstanceId, signal)
   }
 
   /**
-   * 问一次 `/context`：属于本需求就返回上下文，否则 undefined（节点不存在/属于别的需求）。
-   * @param nodeInstanceId - 节点实例 ID
-   * @param requirementId - 期望的需求 ID
-   * @param signal - 取消信号
+   * 从节点清单里选出要操作的节点（纯逻辑，便于脱离网络断言）。
+   * @param requirementId - 需求 ID（仅用于错误提示）
+   * @param nodes - 节点摘要（后端按 seq 升序返回）
+   * @param requirementStatus - 需求状态（in_progress / completed）
+   * @returns 选中的节点摘要
+   * @throws Error 清单为空或没有可定位的节点
    */
-  private async tryContext(nodeInstanceId: number, requirementId: number, signal?: AbortSignal): Promise<NodeContext | undefined> {
-    try {
-      const context = await this.client.nodeContext(nodeInstanceId, signal)
-      return Number(context.requirementId) === Number(requirementId) ? context : undefined
-    } catch {
-      // 不存在 / 库被复位过：跳过
-      return undefined
+  private pickCurrentNode(requirementId: number, nodes: NodeBrief[], requirementStatus: string): NodeBrief {
+    if (nodes.length === 0) {
+      throw new Error(`需求 ${requirementId} 下没有任何节点实例，无法确定当前节点。请联系用户重新创建需求。`)
     }
+    const current = nodes.find(node => node.status === STATUS_CURRENT)
+    if (current !== undefined) return current
+    // 需求已完成：没有 current，取最后一个 done 节点做只读查看（后端会返回 readonly=true）
+    const done = nodes.filter(node => node.status === STATUS_DONE)
+    const last = done[done.length - 1]
+    if (last !== undefined) return last
+    throw new Error(
+      `需求 ${requirementId} 的节点清单里既没有进行中的节点，也没有已完成的节点`
+      + `（需求状态 ${requirementStatus}，节点：${nodes.map(node => `#${node.nodeInstanceId}「${node.name}」${node.status}`).join('、')}）。`
+      + '请在调用时给出 nodeInstanceId（工作台节点页可见）。',
+    )
   }
 
   /** 后端说这个节点属于别的需求：明确报错，避免写错需求。 */
@@ -203,6 +211,11 @@ export class NodeDirectory {
   }
 }
 
+/** 把异常转成一行文本（错误提示用）。 */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /**
  * 按存储根与需求 ID 拼 workspace 路径（纯函数，便于断言）。
  * @param storageRoot - 存储根
@@ -212,21 +225,6 @@ export class NodeDirectory {
 export function resolveWorkspace(storageRoot: string, requirementId: number): string {
   const root = storageRoot.replace(/[\\/]+$/, '')
   return `${root}/${WS_DIR}/${requirementId}`
-}
-
-/**
- * 探测窗口：从需求 ID 起向后找一段节点实例 ID。
- *
- * 为什么从需求 ID 起：两者都是自增主键，需求创建后紧接着创建它的节点，
- * 节点 ID 一定大于需求 ID；一个需求最多几十个节点，因此窗口 256 足够覆盖
- * （每轮只是一批很轻的 GET，且只在新需求还没有输出目录时发生一次）。
- * @param requirementId - 需求 ID
- * @returns 候选节点实例 ID（升序）
- */
-export function probeWindow(requirementId: number, size = 256): number[] {
-  const ids: number[] = []
-  for (let id = requirementId; id < requirementId + size; id += 1) ids.push(id)
-  return ids
 }
 
 /**

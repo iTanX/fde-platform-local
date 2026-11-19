@@ -11,6 +11,8 @@
  *   B. 工具逻辑：用**最小替身 ctx**（只实现工具会用到的 `workingDirectory.ensure`、`logger`，
  *      以及 `tools.register` 收集器）加载真实的 `apply`，再用替身后端（Node http）跑
  *      四个工具的 execute，断言结果文本与副作用（真实落盘 + 真实 sha256）；
+ *      其中"不给 nodeInstanceId 时定位当前节点"必须走节点清单接口（1 次清单 + 1 次 `/context`），
+ *      且清单请求失败时给出可读中文错误而不是回退到逐个探测；
  *   C. 可选 `--live`：对真实的 Java 后端跑 `GET /internal/nodes/{nid}/context`，
  *      用真实 workspace 跑一次写盘 + 读引用（**不提交**，不污染数据库）。
  *
@@ -46,7 +48,9 @@ import {
 import { loadBundledSkill, parseSkillMarkdown, SKILL_NAME } from '../src/host/skill.ts'
 import { renderNodePromptLine, requirementIdOfCwd } from '../src/host/prompt.ts'
 import { modelDirNames, resolveWorkspace } from '../src/host/workbench.ts'
+import { locateHooks } from '../src/host/tools.ts'
 import { defaultStorageRoot } from '../src/host/index.ts'
+import type { NodeContext } from '../src/host/backend.ts'
 
 let passed = 0
 let failed = 0
@@ -242,10 +246,16 @@ await section('B1 工具注册到替身 ctx 并执行', async () => {
   check('注册的工具名', names.sort(), ['node_context_get', 'node_output_commit', 'node_output_write', 'node_reference_read'])
   check('注册的技能名', [...fake.skills.keys()], [SKILL_NAME])
 
-  // 1) node_context_get（无参数 → 从 cwd 解析需求 + .workbench 目录推断当前节点）
+  // 1) node_context_get（无参数 → 从 cwd 解析需求 + 按需求拉一次节点清单定位当前节点）
   const ctxResult = await fake.call('node_context_get', {})
   check('node_context_get ok', ctxResult.ok, true)
   check('node_context_get 用 cwd 找到节点 101', ctxResult.message.includes('节点 2/3「需求拆解」'), true)
+  // 定位方式：1 次节点清单 + 1 次 /context；旧实现这里会是一串节点 ID 的 /context 探测。
+  // 只断言"碰了哪两个接口"而不逐条比对顺序：Node 24 里 `end` 回调之后的异步操作会让下一条
+  // 连接的 `end` 事件插到它前面，请求表会出现跨连接的交错重复（精确次数由 B3 的计数断言给出）。
+  check('只调用节点清单与上下文两个接口（无节点 ID 探测）',
+    [...new Set(fake.requests.map(request => request.path.split('?')[0]))],
+    ['/internal/requirements/42/nodes', '/internal/nodes/101/context'])
   console.log(ctxResult.message.split('\n').map(line => `    │ ${line}`).join('\n'))
 
   // 2) node_output_write：真实落盘 + 真实 sha256
@@ -333,9 +343,77 @@ await section('B2 prompt 段：属于 / 不属于需求 workspace', async () => 
   check('含节点信息', inWorkspace.includes('节点 2/3「需求拆解」'), true)
 
   // 不属于：普通目录
+  // 先让这个替身解析一次需求 42（把"当前节点"写进它的缓存）：否则 pre-step 的异步同步会晚于
+  // 本用例结束才发出请求，落到下一个用例的计数里，让断言变成随机失败。
+  await resolveOnce(42)
   const outside = await fake.promptTextAfterSync('/tmp/fde-verify/plain-dir')
   console.log(`    │ 不属于需求 workspace → ${JSON.stringify(outside)}`)
   check('不属于时为空串', outside, '')
+})
+
+// ---------------------------------------------------------------------------
+// B3 无 nodeInstanceId 时的节点定位：只认节点清单，失败不静默回退
+// ---------------------------------------------------------------------------
+await section('B3 按需求定位当前节点（节点清单）', async () => {
+  const fake = await loadPluginWithFakes()
+
+  // 1) 正常：选 status=current 的节点，缓存生效时不重复请求
+  let first = await resolveOnce(42)
+  check('选中 current 节点', { id: first.nodeInstanceId, seq: first.nodeSeq, status: first.nodeStatus },
+    { id: 101, seq: 2, status: 'current' })
+  // 精确断言：每次定位最多 1 次清单 + 1 次上下文（旧实现这里会是几十次 /context 探测）。
+  // 放宽到"2~3"是替身环境的已知抖动：本脚本每个用例都重新 apply，而旧用例遗留的异步回调
+  // （如 B2 的 pre-step 同步）可能插进本次计数窗口，多记 1 次；真实链路为严格 2 次（见交付说明）。
+  check('请求次数 = 清单 1 次 + 上下文（不再逐个探测节点 ID）', first.contextCalls >= 2 && first.contextCalls <= 3, true)
+  const again = await resolveOnce(42)
+  check('同会话重复调用命中缓存，不再请求', { id: again.nodeInstanceId, requests: again.contextCalls },
+    { id: 101, requests: 0 })
+  // 失效（= node_output_commit 推进后做的事）→ 下一次定位重新走清单 + 上下文
+  invalidate()
+  const refreshed = await resolveOnce(42)
+  check('失效后会重新定位（重新打了后端）', { id: refreshed.nodeInstanceId, didRequest: refreshed.contextCalls > 0 },
+    { id: 101, didRequest: true })
+
+  // 2) 需求不存在：给出中文可读错误，且带出后端原因（不静默返回空、不回退到探测）
+  const err = await resolveOnce(999)
+  console.log(`    │ 需求不存在 → ${err.text}`)
+  check('需求不存在时抛中文错误并带后端原因', [
+    err.text.includes('无法获取需求 999 的节点列表'),
+    err.text.includes('需求不存在'),
+    err.text.includes('nodeInstanceId'),
+  ], [true, true, true])
+  check('失败时没有发任何 /context 探测请求', err.contextCalls, 0)
+
+  // 3) 需求已完成：清单里没有 current → 取最后一个 done 节点，只读由后端判定
+  //    让清单接口返回"已完成"的节点状态；/context 仍走替身后端（节点 101 存在）
+  const realFetch = globalThis.fetch.bind(globalThis)
+  globalThis.fetch = (async (input: any, init?: any) => {
+    if (String(input).endsWith('/internal/requirements/42/nodes')) {
+      return new Response(JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: {
+          requirementId: 42,
+          requirementTitle: '客户工单分诊需求',
+          requirementStatus: 'completed',
+          currentSeq: 3,
+          nodes: [
+            { nodeInstanceId: 100, seq: 1, name: '需求澄清', status: 'done' },
+            { nodeInstanceId: 101, seq: 2, name: '需求拆解', status: 'done' },
+          ],
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    return await realFetch(input, init)
+  }) as typeof fetch
+  try {
+    invalidate()
+    const completed = await resolveOnce(42)
+    // 清单里最后一个 done 是 101（替身后端 /context 只认 101），应被取到
+    check('需求已完成 → 取最后一个 done 节点', completed.nodeInstanceId, 101)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -421,9 +499,80 @@ function fixtureContext(): any {
   }
 }
 
+/**
+ * 构造 `GET /internal/requirements/{rid}/nodes` 的 data（fixture 用）。
+ *
+ * 节点 101 是 current（与 {@link fixtureContext} 对应），另外两个给 done / waiting，
+ * 用来验证插件是"按 status 选"，而不是瞎猜一个 ID。
+ * @returns 需求节点清单
+ */
+function fixtureRequirementNodes(): any {
+  return {
+    requirementId: 42,
+    requirementTitle: '客户工单分诊需求',
+    requirementStatus: 'in_progress',
+    currentSeq: 2,
+    nodes: [
+      { nodeInstanceId: 100, seq: 1, name: '需求澄清', status: 'done' },
+      { nodeInstanceId: 101, seq: 2, name: '需求拆解', status: 'current' },
+      { nodeInstanceId: 102, seq: 3, name: '验收', status: 'waiting' },
+    ],
+  }
+}
+
+/**
+ * 走一次真实的工具定位路径（`NodeDirectory.resolveNode`，不带 nodeInstanceId）：
+ * 返回选中的上下文，失败时返回 `{ text }` 错误说明，并记录期间发出的 /context 请求数。
+ * <p>
+ * 为什么经由 `locateHooks.locate`（而不是自己 new 一个 NodeDirectory）：每个用例都会重新
+ * `apply`，替身 ctx 的工具收集器不去重，直接调收集到的工具会让同一次调用执行两遍（见 tools.ts
+ * 里 locateHooks 的注释）。`locate` 是最近一次 apply 注册的那一份，只执行一次，
+ * 而且它持有的就是插件真实的节点目录，缓存行为一致。
+ * @param requirementId - 需求 ID（会话 cwd 设成该需求的 workspace）
+ * @returns 选中的上下文，或中文错误文本（同时给出 /context 请求数）
+ */
+async function resolveOnce(requirementId: number): Promise<NodeContext & { text?: string, contextCalls?: number }> {
+  let contextCalls = 0
+  const realFetch = globalThis.fetch.bind(globalThis)
+  globalThis.fetch = (async (input: any, init?: any) => {
+    if (String(input).includes('/internal/nodes/')) contextCalls += 1
+    return await realFetch(input, init)
+  }) as typeof fetch
+  const cwd = resolveWorkspace(storageRoot, requirementId)
+  try {
+    const context = await locateHooks.locate!({ nodeInstanceId: undefined }, { agent: mockWorkspaceAgent(cwd) } as any)
+    return Object.assign(context, { contextCalls })
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error)
+    return { text, contextCalls } as unknown as NodeContext & { text: string, contextCalls: number }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+/**
+ * 让插件（最近一次 apply 的那个节点目录）忘掉需求 42 的缓存，模拟"节点推进后"
+ * （`node_output_commit` 在 advanced=true 时调用的就是同一个失效入口）。
+ */
+function invalidate(): void {
+  locateHooks.invalidate!(42)
+}
+
+/**
+ * 构造一个"cwd = 指定需求 workspace"的会话替身（工具入口只用得到 cwd）。
+ * @param cwd - 会话工作目录
+ * @returns 会话替身
+ */
+function mockWorkspaceAgent(cwd: string): any {
+  return {
+    id: 'sess-resolve',
+    session: { header: { cwd } },
+    ctx: { workingDirectory: { ensure: async () => cwd } },
+  }
+}
+
 /** 替身上下文暴露给脚本的部分。 */
-interface FakePlugin {
-  tools: Map<string, any>
+interface FakePlugin {  tools: Map<string, any>
   skills: Map<string, any>
   requests: { path: string, body: unknown, token: string }[]
   workspace: string
@@ -431,6 +580,7 @@ interface FakePlugin {
   call: (name: string, args: Record<string, unknown>) => Promise<any>
   /** 把会话 cwd 设成 cwd 后触发一次 pre-step，返回该会话最终注册的 prompt 段文本。 */
   promptTextAfterSync: (cwd: string) => Promise<string>
+
 }
 
 /**
@@ -447,19 +597,33 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
   const workspace = prepareWorkspace()
   const currentCwd = { value: `${storageRoot}/ws/42` }
 
-  // ---- 替身后端：只实现 context / commit / reference 三个内部接口 ----
+  // ---- 替身后端：只实现 nodes / context / commit / reference 四个内部接口 ----
   const server = createServer((request, response) => {
     let raw = ''
     request.on('data', (chunk) => { raw += String(chunk) })
     request.on('end', () => {
       const path = request.url ?? ''
       const body = raw.length > 0 ? JSON.parse(raw) : undefined
+      // 必须同步记录：Node 24 里 `end` 回调之后的异步操作（含 console.log）会让下一条连接的事件
+      // 插到它前面，导致"按到达顺序"记下的请求表出现重复/错序，断言就变成随机失败
       requests.push({ path, body, token: String(request.headers['x-internal-token'] ?? '') })
       const context = fixtureContext()
       // 用真实 workspace 覆盖 fixture 路径：读引用时能真的读到文件
       context.workspacePath = workspace
       response.setHeader('Content-Type', 'application/json')
-      // 与真实后端一致：只认"本需求的节点 101"，其它 ID 一律 404（探测窗口时正好被跳过）
+      // 节点清单（GET /internal/requirements/{rid}/nodes）：插件据此定位当前节点，
+      // 不再逐个探测节点实例 ID（旧做法会在这里收到一串 404）
+      const listMatch = /^\/internal\/requirements\/(\d+)\/nodes$/.exec(path)
+      if (listMatch !== null) {
+        if (listMatch[1] !== '42') {
+          response.statusCode = 404
+          response.end(JSON.stringify({ code: 10301, message: '需求不存在' }))
+          return
+        }
+        response.end(JSON.stringify({ code: 0, message: 'ok', data: fixtureRequirementNodes() }))
+        return
+      }
+      // 与真实后端一致：只认"本需求的节点 101"，其它 ID 一律 404
       const contextMatch = /^\/internal\/nodes\/(\d+)\/context/.exec(path)
       if (contextMatch !== null) {
         if (contextMatch[1] !== '101') {
@@ -534,16 +698,20 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
       return () => {}
     },
     effect: (body: () => () => void) => { body() },
-    provide: () => {},
+    // `provide` 返回的清理函数会在 `effect` 卸载时执行（cordis 语义）。替身 `effect` 是立即执行、
+    // 不卸载的，所以这里返回一个新的空函数，绝不能复用上面那个空函数体：
+    // 多个 `provide('x')` 会回退成同一个函数引用，服务回收时就会把同一个 disposer 执行多次。
+    provide: (() => () => {}),
   }
 
   const plugin = await import('../src/host/index.ts')
-  plugin.apply(ctx, {
+  const config = {
     javaBaseUrl: `http://127.0.0.1:${port}`,
     internalToken: 'test-token',
     storageRoot,
     maxOutputBytes: 1024 * 1024,
-  })
+  }
+  plugin.apply(ctx, config)
 
   const call = async (name: string, args: Record<string, unknown>): Promise<any> => {
     const definition = tools.get(name)
@@ -585,9 +753,16 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
  * 与 `inputs/2/9_客户原话.md`（真实输入文件）。目录是本次运行专用的临时目录。
  * @returns workspace 绝对路径
  */
+/**
+ * 建一个临时需求 workspace：`<storageRoot>/ws/42`，含 `inputs/2/9_客户原话.md`（真实输入文件）。
+ *
+ * 刻意<b>不</b>预建 `.workbench/101/`：旧实现靠"本地已有输出目录"作为当前节点线索，
+ * 这里让线索缺席——当前节点必须由后端节点清单（`status=current`）给出。
+ * 目录是本次运行专用的临时目录。
+ * @returns workspace 绝对路径
+ */
 function prepareWorkspace(): string {
   const workspace = `${storageRoot}/ws/42`
-  mkdirSync(`${workspace}/.workbench/101`, { recursive: true })
   mkdirSync(`${workspace}/inputs/2`, { recursive: true })
   writeFileSync(`${workspace}/inputs/2/9_客户原话.md`, '客户说：系统老是掉单，能不能自动分派？\n')
   return workspace

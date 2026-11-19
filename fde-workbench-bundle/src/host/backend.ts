@@ -88,6 +88,23 @@ export interface NodeContext {
   nextNodeName?: string | null
 }
 
+/** 一个节点实例的定位摘要（`GET /internal/requirements/{rid}/nodes` 的 nodes[]）。 */
+export interface NodeBrief {
+  nodeInstanceId: number
+  seq: number
+  name: string
+  status: string
+}
+
+/** `GET /internal/requirements/{rid}/nodes` 的 data：需求信息 + 全部节点摘要（按 seq 升序）。 */
+export interface RequirementNodes {
+  requirementId: number
+  requirementTitle: string
+  requirementStatus: string
+  currentSeq: number
+  nodes: NodeBrief[]
+}
+
 /** `POST /internal/nodes/{nid}/outputs/{itemKey}/commit` 的 data。 */
 export interface OutputCommit {
   committed: boolean
@@ -171,6 +188,24 @@ export class BackendClient {
     return await this.request<NodeContext>(
       'GET',
       `/internal/nodes/${nodeInstanceId}/context?operator=agent`,
+      undefined,
+      signal,
+    )
+  }
+
+  /**
+   * 取某个需求下全部节点实例的定位摘要。
+   *
+   * 为什么需要它：`/context` 只接受节点实例 ID，而模型调用 `node_context_get` 时可以不传；
+   * 有了这个接口，"当前节点是哪个"由后端一次回答，插件不必再按节点 ID 逐个试探。
+   * @param requirementId - 需求 ID（来自会话 cwd `<storageRoot>/ws/<requirementId>`）
+   * @param signal - 取消信号
+   * @returns 需求信息与节点摘要（按 seq 升序）
+   */
+  async requirementNodes(requirementId: number, signal?: AbortSignal): Promise<RequirementNodes> {
+    return await this.request<RequirementNodes>(
+      'GET',
+      `/internal/requirements/${requirementId}/nodes`,
       undefined,
       signal,
     )
@@ -265,8 +300,10 @@ export class BackendClient {
       envelope = undefined
     }
 
-    // 401 是"令牌没配对"的典型症状，单独给一句可操作的提示
-    if (response.status === 401) {
+    // 401 是"令牌没配对"的典型症状。只在确实是令牌问题时给那句提示：
+    // /internal/** 的 401 都带 10103（InternalAuthFilter），但业务接口自己也可能返回 401/10101，
+    // 那种情况应原样透出后端的原因，而不是误导用户去改令牌。
+    if (response.status === 401 && (envelope === undefined || envelope.code === 10103)) {
       const detail = envelope?.message ?? text.slice(0, 200)
       throw new BackendError(
         `后端拒绝了内部接口调用（401）：${detail}。请检查插件 internalToken 与后端 FDE_INTERNAL_TOKEN 是否一致。`,
