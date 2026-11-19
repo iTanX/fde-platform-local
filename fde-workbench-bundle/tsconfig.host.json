@@ -1,44 +1,9 @@
 {
-  // 「Host 半」的 TypeScript 工程：src/host → lib/types/host/*.js（tsdown 以 lib/types/host/index.js 为入口）。
-  //
-  // T5-2 起 Host 代码要 import DSH 的官方包（cordis / dsh-tools / dsh-skill / dsh-scope / dsh-agent），
-  // 因此与 tsconfig.client.json 采用同一手法：extends DSH 仓库的 tsconfig.base.json 借用它的
-  // paths（插件包目录不在 DSH workspace 里，node_modules 中也没有 @deepseek-ai/*），
-  // 依赖包自身的诊断不属于本包检查范围，由 scripts/build.sh 过滤掉。
-  // DSH_SRC 由 scripts/build.sh 通过 `-p` 传入的同名环境变量决定，默认 runtime/src（本仓库自带的 dsh 源码）。
   "compilerOptions": {
-    "target": "ES2024",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
     "lib": ["ES2024", "ESNext.Disposable"],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true,
-    "verbatimModuleSyntax": false,
-    "noEmit": false,
-    "declaration": false,
-    "declarationMap": false,
-    "sourceMap": false,
-    "composite": false,
-    "incremental": false,
-    "outDir": "lib/types",
-    "rootDir": "src",
-    // Host 半跑在 dsh 进程里：只要 Node 内置类型，不要 DOM。
-    // typeRoots 指向 DSH 源码 checkout 的 @types（插件包自己的 node_modules 里没有）。
     "types": ["node"],
-    "typeRoots": ["../runtime/src/node_modules/@types"]
+    "outDir": "lib/types",
+    "rootDir": "src"
   },
-  "extends": "../runtime/src/tsconfig.base.json",
-  "include": ["src/host/**/*.ts"],
-  "exclude": [
-    "../../runtime/src/packages/**",
-    "../../runtime/src/vendor/**",
-    "../../runtime/src/apps/**",
-    "../../runtime/src/scripts/**",
-    "../../runtime/src/node_modules/**",
-    "src/client/**"
-  ]
+  "include": ["src/host/**/*.ts"]
 }

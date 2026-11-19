@@ -1,40 +1,8 @@
 {
-  // 只给「Client 半」用的 TypeScript 工程：用来把 src/client 编译成 lib/types/client（JS + .d.ts），
-  // 之后的 lib/client.js 由 tsdown 以 lib/types/client/index.js 为入口打成浏览器工厂包。
-  // 写法与官方 packages/client/* 包一致：JSX、浏览器 lib、不计较副作用导入。
   "compilerOptions": {
-    "target": "ES2024",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "lib": ["ES2024", "DOM", "DOM.Iterable", "ESNext.Disposable"],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true,
-    "verbatimModuleSyntax": false,
-    "noEmit": false,
-    "declaration": false,
-    "declarationMap": false,
-    "sourceMap": false,
-    "composite": false,
-    "incremental": false,
+    "types": [],
     "outDir": "lib/types",
-    "rootDir": "src",
-    // 依赖包（DSH 源码）不在本包 program 的 rootDir 下，也不是本包的检查对象：
-    // 这些目录里的源码只用来提供类型，诊断一律跳过（与官方 skipLibCheck 的意图一致）。
-    "types": []
+    "rootDir": "src"
   },
-  // 依赖包的类型解析：插件包目录不在 DSH workspace 里，node_modules 里没有 @deepseek-ai/*，
-  // 因此沿用 DSH 仓库自己的做法 —— 用 paths 指向各包的 src（仅用于类型检查，
-  // 产物的模块图由 tsdown 按 dsh.client 的模块表决定）。
-  "extends": "/tmp/dsh-plugin-dev/tsconfig.base.client.json",
-  "include": ["src/client/**/*.ts", "src/client/**/*.tsx"],
-  "exclude": [
-    "/tmp/dsh-plugin-dev/packages/**",
-    "/tmp/dsh-plugin-dev/vendor/**",
-    "/tmp/dsh-plugin-dev/scripts/**"
-  ]
+  "include": ["src/client/**/*.ts", "src/client/**/*.tsx"]
 }
