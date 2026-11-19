@@ -9,6 +9,8 @@ executor: "subagents"
 # Web 工作台 任务拆分与派发计划
 
 > 本文是可执行的任务事实源。`lead` 负责定边界、写验收、派发、与用户确认；**所有代码由 subagent 实现**。任务完成状态以子代理回传的真实证据为准，未验证不勾选。
+>
+> **部署原则（2026-11-19 确认）**：本项目**自带一个可携带的 dsh**，不依赖也不修改用户本机已安装的 DeepSeek Harness。所有 dsh 数据、profile、端口均与用户环境隔离。详见 [architecture.md §13](architecture.md#13-自带可携带的-deepseek-harness部署原则)。
 
 ## 0. 协作规则
 
@@ -34,11 +36,11 @@ executor: "subagents"
 
 ```text
 波次 1（并行，互相无依赖）
-  T0-1  Java 多模块骨架
-  T0-3  DSH 插件包骨架 + 会话嵌入冒烟
-  （T0-2 由 lead 完成，不派发）
+  T0-1  Java 多模块骨架            ✅ 已完成
+  T0-3  DSH 插件包骨架 + 构建打通   ✅ 产物已交付（安装验证推迟到自带 dsh）
+  T0-4  自带可携带 dsh 的构建与启动脚本（新）
 
-波次 2（依赖波次 1）
+波次 2（依赖 T0-4 与 T1-1）
   T1-1  认证与项目中心后端        ← T0-1
   T1-3  工作台外壳与生成代码      ← T0-3
 波次 3
@@ -173,6 +175,35 @@ fde-platform-local/
   期望：面板内消息流可见、输入框可输入并可发送、面板可滚动；`Esc Esc` 停止仍生效；禁用插件后 DSH 恢复原样
 - 回传：构建命令与输出、安装与启用结果（`plugin_manager` 的 `list_plugins` 行状态）、冒烟截图或文案描述、遇到的问题与结论
 - 风险提示：这是**最高不确定性**任务，必须先打通"构建 + 加载 + 会话嵌入"三件事再谈其他。
+
+### 波次 1.5
+
+#### T0-4 自带可携带 dsh 的构建与启动（新增）
+
+- 依赖：T0-3（插件产物可加载）、T0-1（后端可启动）
+- 目标：在一台**未安装 DeepSeek Harness** 的电脑上，仅装 Node 后执行一条命令即可运行本项目；用户本机已有 DSH 时互不干扰。
+- 产出：
+  - `scripts/setup-runtime.sh` / `.ps1`：按固定 tag（`dsh-v0.2.2-rc.5`）拉取或使用本地副本构建自带 dsh，产出 `runtime/dsh`；生成 `runtime/profile`（bundles = 官方 web bundle + `fde-workbench-bundle`）；安装插件依赖
+  - `scripts/start-all.sh` / `.ps1`：以 `DSH_HOME=<repo>/runtime/dsh-home`、独立端口启动 dsh；同时拉起 Java 后端；任一失败给出明确原因
+  - `docs/runtime.md`：目录约定、构建步骤、端口、升级方式、搬运到新机器的步骤、故障排查
+  - `.gitignore` 增加 `runtime/`
+- 约束：
+  - **绝不写入 `~/.dsh`**；不读取用户本机 DSH 的任何数据
+  - 端口可配，默认 dsh `3080`、后端 `8081`，与用户本机 DSH（如 57320）不冲突
+  - 脚本跨 macOS/Linux/Windows，路径不硬编码到某台机器
+  - 构建产物不入库；未验证项必须如实标注
+- 禁区：不改 DSH 官方源码；不把插件装进用户全局 profile；不提交 `runtime/`
+- 验收（必须在**不影响**用户本机 Desktop 的前提下执行）：
+  ```bash
+  ./scripts/setup-runtime.sh          # 成功产出 runtime/dsh 与 profile
+  ./scripts/start-all.sh &            # dsh 与后端同时起来
+  curl -s http://127.0.0.1:8081/api/health          # db=ok
+  curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080   # 200
+  ```
+  期望：用户本机 `~/Library/Application Support/@deepseek-ai/dsh-desktop` 与 `~/.dsh` **内容无变化**（可用 `ls -la` 前后对比、或比对文件数量）
+- 回传：构建耗时与体积、启动日志、两个端口探测结果、`~/.dsh` 未被写证明、搬运可行性结论（单目录大小、是否依赖全局 node_modules）
+
+> 现状参考：Desktop 安装包内的 `app.asar` 是归档文件，其内 node_modules 不能直接作为可搬运运行时；参考项目 `refer/FF-FDE-Delivery-Workbench/upstream/deepseek-harness` 有完整源码与 `corepack pnpm` 构建流程，可作起点。版本须与插件目标版本一致（`0.2.2-rc.5`）。
 
 ### 波次 2
 
@@ -344,8 +375,10 @@ fde-platform-local/
 |---|---|---|
 | T0-1 | — | 与 T0-3 |
 | T0-3 | — | 与 T0-1 |
+| T0-4 | T0-3、T0-1 | — |
 | T1-1 | T0-1 | |
 | T1-3 | T0-3 | 与 T1-1 |
+| T5-2 | T0-4 提供运行环境 | — |
 | T1-2 | T1-1 | |
 | T2-1 | T1-2 | |
 | T2-3 | T1-3、T2-1 | |
@@ -367,7 +400,8 @@ fde-platform-local/
 | 任务 | 状态 | 证据 |
 |---|---|---|
 | T0-1 | ✅ 完成（提交 `10a393c`） | `mvn package` 通过；`/api/health` = `db=ok`；错误密码降级为 `19901/db=down`；提交前 `git diff --cached` 无明文密码 |
-| T0-3 | 🔄 进行中（plugin-skeleton） | — |
+| T0-3 | ✅ 产物已交付（构建打通） | `lib/index.js` + `lib/client.js`（官方 `clientBundle` 预设，外部依赖仅 react）；**安装与界面验证未执行**（改为装入自带 dsh 后验证） |
+| T0-4 | 未开始 | — |
 | T1-1 | 未开始 | — |
 | T1-2 | 未开始 | — |
 | T1-3 | 未开始 | — |
@@ -388,7 +422,8 @@ fde-platform-local/
 
 | # | 项 | 影响 |
 |---|---|---|
-| C1 | 插件构建方式：DSH 源码 checkout 内构建，还是独立仓库构建后安装 | 决定 T0-3 的做法与后续每个前端任务的构建命令 |
+| C1 | ~~插件构建方式~~ 已确认：官方 `tsdown.client.ts` 的 `clientBundle` 预设，在 DSH 源码 checkout 副本内构建 | — |
+| C6 | 自带 dsh 的运行形态：桌面窗口 vs 浏览器网页 | 决定 T0-4 的启动方式与打包体积 |
 | C2 | 后端启动时数据库密码如何提供（环境变量 / 本地配置文件） | T0-1 |
 | C3 | 是否需要给用户提供 Docker 一键启动 | T6-1 |
 | C4 | ~~git 提交~~ 已确认：按任务卡粒度提交 | — |

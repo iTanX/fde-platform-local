@@ -6,6 +6,8 @@ updated: "2026-11-19"
 
 # Web 工作台 架构设计
 
+> **部署原则（2026-11-19 确认）**：本项目**自带一个可携带的 DeepSeek Harness**，拷贝到任何一台电脑（安装 Node 后）都能运行，**不依赖、不修改用户本机已安装的 DSH**。用户本机若已有 Desktop 版，与本项目互不干扰（独立 profile、独立 `DSH_HOME`、独立端口）。实现方式见 §13。
+>
 > **架构版本 v2（2026-11-19 修订）**：由"独立 SPA + 跨源 iframe"改为**DSH 插件内原生页面**。业务界面以 React 组件形式注册进 DSH 的 `main` 面板；节点页与 DSH 会话同页共存，用户无需离开工作台。原 v1 的 iframe/postMessage 设计作废，决策过程见 §11 AD-1。
 
 ## 1. 架构目标
@@ -298,7 +300,7 @@ POST /internal/nodes/{nid}/outputs/{itemKey}/commit { relativePath, sha256, oper
 | 安全 | JWT（HS256，默认 12h）；密码 BCrypt；`/internal/**` 预共享密钥 + 仅本机绑定；上传文件类型与大小校验；无 SQL 拼接 |
 | 性能 | 列表分页（默认 20）；节点详情一次性返回整条流程；文件下载走流式 |
 | 可观测 | 统一请求日志（traceId）；内部接口调用日志；Agent 工具失败写业务日志 |
-| 部署 | `docker-compose.yml`（mysql + server）可选；最少只需一个 MySQL 与一个 Java 进程 |
+| 部署 | 自带 dsh（§13）：`runtime/` 内是官方源码构建产物 + 本项目 profile + 插件；`scripts/start-all.*` 一条命令拉起 dsh 与 Java 后端；MySQL 需外部提供（本阶段连接既有实例） |
 
 ## 10. 配置项
 
@@ -338,5 +340,48 @@ dsh:
 | # | 项 | 影响 |
 |---|---|---|
 | A1 | ~~侧栏入口落位~~ 已确认：面板条目 | — |
-| A2 | ~~会话呈现方式~~ 已确认：节点页内嵌官方会话组件（§2.1） | — |
+| A2 | ~~会话呈现方式~~ 已确认：节点页内嵌官方会话组件 | — |
 | A3 | 是否需要 Docker 交付 | 影响部署文档 |
+| A4 | 自带 dsh 的运行形态：桌面窗口还是浏览器网页（见 §13） | 决定启动脚本与打包体积 |
+
+## 13. 自带可携带的 DeepSeek Harness（部署原则）
+
+### 13.1 目标
+
+| 目标 | 判断标准 |
+|---|---|
+| 不依赖本机 DSH | 在未安装 DeepSeek Harness 的电脑上，仅安装 Node 后即可运行本项目 |
+| 不干扰本机 DSH | 用户已有 Desktop/Web 版时，两者的 profile、`DSH_HOME`、端口互不共享 |
+| 可搬运 | 整个仓库目录（或打包产物）拷贝到另一台机器后仍能启动 |
+| 版本可控 | 固定官方版本（当前 `dsh-v0.2.2-rc.5`），升级时明确记录 |
+
+### 13.2 目录约定
+
+```text
+fde-platform-local/
+├── runtime/                       # 自带 dsh（构建产物，不入库）
+│   ├── dsh/                       # 官方源码构建产物（web bundle 等）
+│   ├── dsh-home/                  # 本项目专属 DSH_HOME（会话、工作区、storage）
+│   └── profile/                   # 本项目专属 profile（bundles = 官方 web + 本插件）
+├── fde-workbench-bundle/          # 插件源码与产物
+├── workbench/                     # Java 后端
+└── scripts/
+    ├── setup-runtime.sh|.ps1      # 一次性：构建自带 dsh 与插件，生成 profile
+    └── start-all.sh|.ps1          # 启动：dsh（隔离 DSH_HOME）+ Java 后端
+```
+
+### 13.3 约束
+
+1. **绝不写入 `~/.dsh`**：所有 dsh 数据流进 `runtime/dsh-home`，profile 指向 `runtime/profile`。
+2. **独立端口**：dsh 使用本项目专属端口（默认 3080，可配），避免与本机 DSH 冲突。
+3. **版本锁定**：`runtime/` 由脚本按固定 tag 构建；升级需在 `docs/` 记录版本与验证结论。
+4. **跨平台**：提供 `.sh`（macOS/Linux）与 `.ps1`（Windows）两套脚本；路径不得含空格假设以外的硬编码。
+5. **构建产物不入库**：`runtime/` 进 `.gitignore`，由 `setup-runtime` 脚本生成。
+
+### 13.4 待验证（阶段 0 之后）
+
+| # | 待验证 | 负责任务 |
+|---|---|---|
+| V1 | 官方源码能否构建出可独立启动的 web bundle，产物大小与依赖形态 | T0-4 |
+| V2 | 本项目 profile 加载插件（而非装进全局 profile）的可行做法 | T0-4 |
+| V3 | 拷贝到另一台机器（仅装 Node）后能否启动 | T6-1 |
