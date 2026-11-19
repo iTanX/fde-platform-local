@@ -25,11 +25,23 @@ export function FileUploadButton({ onPick, label, busyLabel, busy, disabled, tes
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [hover, setHover] = useState(false)
 
-  /** 选中文件后回调，并清空 input.value 让同一个文件可以再次选择。 */
+  /**
+   * 选中文件后回调。
+   * <p>
+   * <b>顺序很重要</b>：`input.value = ''` 会把 `files` 一起清空（FileList 是实时引用），
+   * 先清空再读会让文件变成空对象——上传请求带着 0 字节的 body 出去，后端直接拒收，
+   * 表现就是"选完文件页面闪一下、什么都没发生"。
+   * 所以先把 File 取出来，再用 `queueMicrotask` 延后清空，让同一个文件下次还能再选。
+   *
+   * @param event - input 的 change 事件
+   */
   const changed = (event: ChangeEvent<HTMLInputElement>): void => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (file !== undefined) onPick(file)
+    const input = event.target
+    const file = input.files?.[0]
+    if (file === undefined) return
+    onPick(file)
+    // 延后清空：立刻清空会让上面已经交给调用方的 File 引用失效
+    queueMicrotask(() => { input.value = '' })
   }
 
   return (
@@ -39,7 +51,24 @@ export function FileUploadButton({ onPick, label, busyLabel, busy, disabled, tes
         type="file"
         data-fde-file-input={testId}
         onChange={changed}
-        style={{ display: 'none' }}
+        // 用"移出可视区 + 0 尺寸"而不是 display:none：
+        // display:none 的 input 在部分浏览器 / 嵌入容器（如插件面板的 iframe 或 portal）里
+        // 调用 click() 不会弹出文件选择框，表现为"点了上传没反应、也发不出请求"。
+        // 视觉上仍然不可见，可访问性上仍可被聚焦触发。
+        style={{
+          position: 'absolute',
+          width: '1px',
+          height: '1px',
+          padding: 0,
+          margin: '-1px',
+          overflow: 'hidden',
+          clip: 'rect(0 0 0 0)',
+          whiteSpace: 'nowrap',
+          border: 0,
+          opacity: 0,
+        }}
+        tabIndex={-1}
+        aria-hidden="true"
       />
       <button
         type="button"

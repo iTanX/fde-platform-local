@@ -62,6 +62,28 @@ function nextUid(prefix: string): string {
 }
 
 /**
+ * 由输出项名称派生一个合法的 `itemKey`（后端要求 `^[a-z0-9][a-z0-9-]{0,63}$`）。
+ * <p>
+ * 为什么不把手填 itemKey 作为必填项：用户眼里只有"输出项名称"（MD 服务概述、调用次数报表），
+ * `itemKey` 是内部稳定键，让用户手写还要满足正则，属于把实现细节推给使用者。
+ * 这里按名称派生：ASCII 字母数字转小写、其余折叠成 `-`；
+ * 中文名派生不出合法字符时退化为 `output-<序号>`，保证一定能保存。
+ *
+ * @param name - 输出项名称
+ * @param index - 该节点内输出项下标（用于兜底与去重）
+ * @returns 合法 itemKey
+ */
+function deriveItemKey(name: string, index: number): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    // 纯中文名（如"服务概述"）派生不出可用字符，带上序号避免同节点内重名
+    return /^[a-z0-9][a-z0-9-]*$/.test(slug) ? slug : `output-${index + 1}`
+}
+
+/**
  * 把后端节点映射成编辑态。
  * @param workflow - 流程详情
  */
@@ -237,8 +259,9 @@ function EditorBody({ workflow, canEdit, skillList, skillsError, onSaved, onRelo
           required: item.required,
         }))
         : [],
-      outputs: node.outputs.map(item => ({
-        itemKey: item.itemKey,
+      outputs: node.outputs.map((item, index) => ({
+        // itemKey 留空时按名称派生；用户手填了就用用户的（保持稳定键可显式指定）
+        itemKey: item.itemKey.trim() === '' ? deriveItemKey(item.name, index) : item.itemKey,
         name: item.name,
         description: item.description === '' ? undefined : item.description,
         fileKind: item.fileKind,
@@ -595,7 +618,7 @@ function ItemRow({ kind, item, index, disabled, onPatch, onRemove, t }: {
       {kind === 'outputs'
         ? (
           <input
-            placeholder={t('editor.itemKey')}
+            placeholder={t('editor.itemKeyOptional')}
             value={item.itemKey}
             onChange={(event) => { onPatch({ itemKey: event.target.value }) }}
             style={{ ...inputBase, ...mono }}

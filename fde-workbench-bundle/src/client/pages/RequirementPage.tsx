@@ -174,8 +174,14 @@ export function RequirementPage({ store, requirementId, nodeId, view }: {
               ? <NodeSessionPanel requirementId={requirementId} node={nodeData} />
               : (
                 <div style={{ overflow: 'auto', paddingBottom: '16px' }}>
+                  {/*
+                    key 只放 nodeId：切换节点才需要重置内部状态。
+                    曾经把 filesVersion 也放进 key，结果每次上传/提交都会把组件整个卸载重建，
+                    重建时拿到的是旧数据（reload 还没返回），页面表现为"闪一下、文件没出现"。
+                    filesVersion 依然作为 prop 传入，用于组件内部感知"数据已刷新"。
+                  */}
                   <NodeInfoPanel
-                    key={`${nodeId}-${filesVersion}`}
+                    key={nodeId}
                     requirementId={requirementId}
                     node={nodeData}
                     filesVersion={filesVersion}

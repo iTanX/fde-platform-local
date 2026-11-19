@@ -33,7 +33,9 @@ export function useLoadable<T>(loader: () => Promise<T>, deps: readonly unknown[
 
   useEffect(() => {
     let cancelled = false
-    setState({ kind: 'loading' })
+    // 重新加载时保留上一次的成功数据：否则每次 reload 都会把整块 UI 换成"加载中"，
+    // 上传/提交后页面会明显闪一下（用户以为没成功）。首屏仍从 loading 开始。
+    setState(previous => (previous.kind === 'ready' ? previous : { kind: 'loading' }))
     void (async () => {
       try {
         const data = await loaderRef.current()

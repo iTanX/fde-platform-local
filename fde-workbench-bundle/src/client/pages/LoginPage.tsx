@@ -12,7 +12,7 @@ import type { WorkbenchApi } from '../api/index.ts'
 import type { AppStore } from '../store/app-store.ts'
 import type { WorkbenchTranslate } from '../session/NodeSessionView.tsx'
 import { ErrorState } from '../ui/components.tsx'
-import { buttonBase, buttonDisabled, buttonPrimary, card, color, formLabel, formRow, inputBase, muted } from '../ui/styles.ts'
+import { buttonBase, buttonDisabled, buttonPrimary, card, formLabel, formRow, inputBase, muted } from '../ui/styles.ts'
 
 /** 登录表单状态。 */
 type Phase =
@@ -155,17 +155,12 @@ export function LoginPage({ api, store, t }: {
             {t(registering ? 'login.backToLogin' : 'login.register')}
           </button>
         </div>
-        <div style={{ marginTop: '12px', height: '1px', background: color.border }} />
-        <p style={{ ...muted, margin: '12px 0 0' }} data-fde-login-backend="">
-          {t('common.backendUnreachable', { base: api.client.baseUrl })}
-        </p>
-        <button
-          type="button"
-          style={{ ...buttonBase, marginTop: '8px' }}
-          onClick={() => { window.location.reload() }}
-        >
-          {t('common.retry')}
-        </button>
+        {/*
+          后端连通状态只在"确实连不上"时出现（phase.unreachable）。
+          这里曾经无条件渲染过一句"无法连接工作台后端"+重试按钮，
+          导致登录页底部永远挂着一个错误提示，而后端其实正常——误导读排查方向。
+          失败提示统一由上面的 ErrorState 呈现，这里不再重复。
+        */}
       </form>
     </div>
   )
