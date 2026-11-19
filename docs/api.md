@@ -18,6 +18,7 @@ base_url: "http://127.0.0.1:8081"
 | 鉴权 | `Authorization: Bearer <JWT>`；`/api/auth/**` 与 `/api/public/**` 免鉴权 |
 | 分页参数 | `page`（从 1 开始）、`size`（默认 20，最大 100） |
 | 排序参数 | `sort`（字段）与 `order`（`asc`/`desc`），默认 `createdAt desc` |
+| 乐观锁版本号 | **PUT/整体保存**放请求体 `revision`；**DELETE** 放查询参数 `?revision=N`（部分客户端会丢弃 DELETE 请求体）。缺失或已过期均返回 `10402`/`10001` |
 
 ### 1.2 统一响应
 
@@ -112,7 +113,13 @@ base_url: "http://127.0.0.1:8081"
   "lastActiveAt": "…", "archived": false, "isNodePrimary": true }
 ```
 
-### 1.5 权限记号
+### 1.5 时间与时区
+
+- 所有时间字段由应用写入（数据库列无默认值），统一为 `+08:00`。
+- JDBC 会话时区固定 `+08:00`（URL 参数 `sessionVariables=time_zone='%2B08:00'`），服务启动时断言 `SELECT @@session.time_zone`，并在 `/api/health` 返回 `sessionTimeZone`。
+- VO 时间字段统一使用 `TimeFormats` 序列化，保证 JSON 中带时区偏移。
+
+### 1.6 权限记号
 
 | 记号 | 含义 |
 |---|---|
@@ -166,7 +173,7 @@ base_url: "http://127.0.0.1:8081"
 | POST | `/api/projects` | 已登录 | 创建项目（创建人为 owner） |
 | GET | `/api/projects/{id}` | M | 项目详情 |
 | PUT | `/api/projects/{id}` | O | 编辑（带 `revision`） |
-| DELETE | `/api/projects/{id}` | O | 删除（逻辑删除，二次确认由前端负责） |
+| DELETE | `/api/projects/{id}?revision=N` | O | 删除（逻辑删除；`revision` 必填，二次确认由前端负责） |
 
 ### POST `/api/projects`
 
@@ -189,10 +196,11 @@ base_url: "http://127.0.0.1:8081"
 |---|---|---|---|
 | GET | `/api/projects/{projectId}/members` | M | 成员列表 |
 | POST | `/api/projects/{projectId}/members` | O | 添加成员 `{ "username": "demo2" }` |
-| DELETE | `/api/projects/{projectId}/members/{userId}` | O | 移除成员（不能移除 owner 自己，需先转让）；同时删除该成员在此项目内的技能（含各版本），需求因外键 `fk_requirement_creator` 拒绝删除 |
+| DELETE | `/api/projects/{projectId}/members/{userId}` | O | 移除成员（不能移除 owner 自己，需先转让）；需带 `?revision=` 的项目版本号；同时删除该成员在此项目内的技能（含各版本），若其仍有需求则整体回滚 |
 | POST | `/api/projects/{projectId}/members/{userId}/transfer-owner` | O | 转让 owner |
 
-- 转让成功后：目标用户 `role=owner`，原 owner `role=member`，`wb_project.owner_id` 更新；同一事务完成。
+- 转让成功后：目标用户 `role=owner`，原 owner `role=member`，`wb_project.owner_id` 更新；**必须在同一事务内同时改这两处**。
+- **owner 判定为双源校验**：`wb_project.owner_id == 当前用户` **且** 成员表中存在该用户的 `role=owner` 记录。任一处不符按非 owner 处理（`10202`）。这样即便转让只改了一半也会被立刻暴露，而不会出现两个 owner 或无人可管。
 - 移除成员的事务顺序：① 删除 `wb_skill`（`created_by=该用户`）及其版本；② 删除成员记录。任一步失败整体回滚。
 - 添加不存在的用户名 → `404 10301`；已是成员 → `409 10401`。
 
