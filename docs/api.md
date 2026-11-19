@@ -234,7 +234,7 @@ base_url: "http://127.0.0.1:8081"
 
 **引用判定口径（已定稿：引用即保护）**：只要满足以下**任一**条件即不可删除：
 
-1. **流程模板引用**：`wb_workflow_node_skill` 中仍有 `deleted=0` 的流程节点引用该技能；
+1. **流程模板引用**：`wb_workflow_node_skill` 中仍有节点引用该技能，且所属流程 `wb_workflow.deleted=0`。
 2. **未完成实例引用**：`wb_requirement_node.skills_snapshot` 中包含该 `skillId`，且所属需求 `status != 'completed'`。
 
 理由：节点技能是在流程编排时确定的设计决策，模板引用被删除会让后续新建需求的节点缺技能；而 DSH 技能加载随插件版本发布（见 plugin-integration.md），不存在"删了再传同名"来绕过保护的正规入口。
@@ -410,6 +410,7 @@ base_url: "http://127.0.0.1:8081"
 |---|---|---|
 | POST | `/internal/nodes/{nodeInstanceId}/outputs/{itemKey}/commit` | 登记模型产出并推进节点 |
 | GET | `/internal/nodes/{nodeInstanceId}/context` | 供 Host 工具 `node_context_get` 取节点快照 |
+| GET | `/internal/requirements/{requirementId}/nodes` | 返回需求状态、`currentSeq` 和按 `seq` 排序的节点摘要 |
 | POST | `/internal/sessions` | 插件新建会话后登记（同 9 的 POST，但免 JWT） |
 | POST | `/internal/nodes/{nodeInstanceId}/reference` | 记录模型读取了某引用文件（用于展示"模型读了什么"） |
 
