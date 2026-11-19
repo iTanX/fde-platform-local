@@ -400,7 +400,7 @@ fde-platform-local/
 | 任务 | 状态 | 证据 |
 |---|---|---|
 | T0-1 | ✅ 完成（提交 `10a393c`） | `mvn package` 通过；`/api/health` = `db=ok`；错误密码降级为 `19901/db=down`；提交前 `git diff --cached` 无明文密码 |
-| T0-3 | ✅ 产物已交付（构建打通） | `lib/index.js` + `lib/client.js`（官方 `clientBundle` 预设，外部依赖仅 react）；**安装与界面验证未执行**（改为装入自带 dsh 后验证） |
+| T0-3 | ✅ 完成（提交 `545ae95`） | 构建可复现；浏览器产物外部依赖仅 react；替身 ctx 注册出 locale/工厂/main/侧栏四项；**安装与界面验证未执行**（改为装入自带 dsh 后验证） |
 | T0-4 | 未开始 | — |
 | T1-1 | 未开始 | — |
 | T1-2 | 未开始 | — |

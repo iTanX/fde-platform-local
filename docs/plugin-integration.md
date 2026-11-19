@@ -164,6 +164,12 @@ RequirementPage
 | `<SessionProvider>` 是 `ui-slots`/`ui-renderer` 提供的标准会话作用域席位 | `ui-slots/src/index.ts`、`ui-renderer/src/client/scoped-slots.tsx` |
 | `embedded` 变体不渲染全屏 Hero（`hero && variant !== 'embedded'`），尺寸由宿主容器决定 | `ui-conversation/src/client/skeleton/ConversationContent.tsx` |
 
+**实测纠正（T0-3 源码实读 + 类型校验结论）**：
+
+1. **`conversation.content` 只能在「工厂定义」内部调用**。普通 entry 拿到的 `renderFactorySlot` 绑定在 entry 自身，去渲染别的工厂的槽位会被槽位归属校验拒绝。正确做法是照搬官方 `ui-subagent` 的结构：**自建一个会话作用域工厂**（如 `workbench.node.chat`），其局部槽位组件里 `<SessionProvider>` + `renderFactorySlot('conversation.content', …)`。
+2. **`SessionProvider` 只出现在声明了会话子槽位的注册项上**；`main` 面板的 inject 里没有它，必须由上述局部槽位组件承接。
+3. 组件把实际的 `phase`/`hero` 写到容器 `data-*` 属性上，便于装好后在 DevTools 直接核对。
+
 **实现要点**：
 
 1. `NodeSessionView` 用一个固定宽高的容器（`height: 100%`）包住工厂输出；`embeddedBody` 样式会让内容填满容器。
