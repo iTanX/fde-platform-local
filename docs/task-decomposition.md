@@ -406,7 +406,7 @@ fde-platform-local/
 | T1-1 | ✅ 完成（提交 `9888845`） | `mvn clean install` 12 例全绿（lead 独立复跑）；curl 覆盖权限矩阵与乐观锁；时区断言 `+08:00`；8081 已释放 |
 | T1-2 | ✅ 完成（提交 `c6c23c0`） | `mvn clean install` 18 例全绿（lead 独立复跑）；curl 覆盖越权、过期 revision、移除回滚与项目 1 还原 |
 | T1-3 | 未开始 | — |
-| T2-1 | 未开始 | — |
+| T2-1 | ✅ 完成（提交 `7ec6f6e`） | `mvn clean install` 23 例全绿（lead 独立复跑）；curl 覆盖版本升级、路径穿越拒绝、引用拦截 409、越权 403 |
 | T2-3 | 未开始 | — |
 | T3-1 | 未开始 | — |
 | T3-3 | 未开始 | — |
@@ -432,3 +432,4 @@ fde-platform-local/
 | C7 | DELETE 的 revision 传参方式 | 已定稿：查询参数 `?revision=N`（[api.md §1.2](api.md)） |
 | C8 | owner 判定是否双源校验 | 已定稿：`owner_id` 与成员表角色必须同时一致（[api.md §4](api.md)） |
 | C9 | 移除成员的引用完整性靠外键还是显式校验 | 已定稿：**显式校验**。实际外键 `fk_requirement_creator` 指向 `wb_user` 而非成员关系，外键拦不住 |
+| C10 | 技能删除的引用口径：模板引用即锁，还是模板引用 **且** 实例引用 | 已定稿：**引用即保护**（任一命中即 409）。原 api.md 写成"且"与验收要求矛盾，已统一 |
