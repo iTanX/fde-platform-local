@@ -30,6 +30,19 @@ import type { NodeBrief, NodeContext } from './backend.ts'
 import { WS_DIR, parseWorkspaceCwd } from './paths.ts'
 import type { Settings } from './settings.ts'
 
+/**
+ * 判断异常是否为"取消"。
+ * <p>
+ * 取消必须原样抛出去：调用方（DSH）用 AbortSignal 表达"这次发现作废"，
+ * 把它当成普通失败吞掉会让上层拿到空目录并缓存下来。
+ *
+ * @param error - 捕获到的异常
+ * @returns 是否为取消
+ */
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
 /** 节点状态里的"当前节点"（与后端 `RequirementNode.STATUS_CURRENT` 一致）。 */
 const STATUS_CURRENT = 'current'
 
@@ -123,6 +136,28 @@ export class NodeDirectory {
     this.assertSameRequirement(discovered, requirementId)
     this.remember(discovered)
     return discovered
+  }
+
+  /**
+   * 按会话 cwd 解析当前节点（技能发现与 prompt 段共用）。
+   * <p>
+   * 只认 `<storageRoot>/ws/<id>` 形状的 cwd：普通会话（任意目录）一律返回 `undefined`，
+   * 既不发请求，也不会把节点技能暴露给无关会话。
+   *
+   * @param cwd - 会话工作目录（可能为空：尚未确定 cwd 的会话）
+   * @param signal - 取消信号
+   * @returns 节点上下文；cwd 不属于需求 workspace 或解析失败时为 `undefined`
+   */
+  async resolveNodeByCwd(cwd: string | undefined, signal?: AbortSignal): Promise<NodeContext | undefined> {
+    const parsed = parseWorkspaceCwd(cwd, this.settings.storageRoot)
+    if (parsed === undefined) return undefined
+    try {
+      return await this.resolveNodeByRequirement(parsed.requirementId, signal)
+    } catch (error) {
+      // 后端不可达或需求刚被删除：技能发现退化为"没有节点技能"，由工具侧给出可读错误
+      if (isAbort(error)) throw error
+      return undefined
+    }
   }
 
   /**

@@ -447,6 +447,33 @@ if (process.argv.includes('--live')) {
   })
 }
 
+await section('B4 节点自定义技能（按 cwd 与快照版本提供）', async () => {
+  const fake = await loadPluginWithFakes()
+  check('apply 后注册了技能提供者', fake.skillProviders.length, 1)
+  const provider = fake.skillProviders[0]({ signal: new AbortController().signal, invalidate: () => {} })
+  check('provider 名称', provider.name, 'workbench-node-skills')
+
+  // 属于需求 workspace：拿到本节点的技能，别名带节点 ID、顺序号与快照版本
+  const inside = await provider.list({ cwd: fake.workspace })
+  const names = inside.map((candidate: any) => candidate.name)
+  console.log(`    │ 属于需求 workspace → ${names.length} 项：${names.join('、')}`)
+  check('节点技能按配置数量提供', names.length, 2)
+  check('别名含节点 ID 与快照版本', names.join(','),
+    'workbench-node-101-skill-1-v2,workbench-node-101-skill-2-v1')
+  check('候选描述带原始技能名', inside[0]?.description.includes('需求拆解'), true)
+
+  // 不属于需求 workspace：普通会话看不到节点技能
+  const outside = await provider.list({ cwd: '/tmp' })
+  check('不属于需求 workspace → 空列表', outside.length, 0)
+
+  // 未知候选不返回正文（避免模型拿到别的节点的技能）
+  const unknown = await provider.get(
+    { name: 'workbench-node-101-skill-9-v1', provider: 'workbench-node-skills' },
+    { cwd: fake.workspace },
+  )
+  check('未知候选 → undefined', unknown, undefined)
+})
+
 console.log(`\n结果：通过 ${passed} 项，失败 ${failed} 项`)
 process.exit(failed === 0 ? 0 : 1)
 
@@ -472,7 +499,8 @@ function fixtureContext(): any {
     nodeStatus: 'current',
     inputType: 'fixed',
     readonly: false,
-    skills: [{ name: '需求拆解', versionNo: 2 }],
+    // 两个技能：覆盖 PRD AC-E5.2「多技能按配置顺序生效」与别名里的顺序号
+    skills: [{ name: '需求拆解', versionNo: 2 }, { name: '验收标准', versionNo: 1 }],
     inputItems: [
       {
         itemId: 5,
@@ -580,7 +608,8 @@ interface FakePlugin {  tools: Map<string, any>
   call: (name: string, args: Record<string, unknown>) => Promise<any>
   /** 把会话 cwd 设成 cwd 后触发一次 pre-step，返回该会话最终注册的 prompt 段文本。 */
   promptTextAfterSync: (cwd: string) => Promise<string>
-
+  /** apply 时注册的节点技能提供者工厂（B4 用真实 provider 验证候选列表）。 */
+  skillProviders: Array<(control: any) => any>
 }
 
 /**
@@ -664,6 +693,8 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
   // ---- 替身 ctx ----
   const tools = new Map<string, any>()
   const skills = new Map<string, any>()
+  /** 节点技能提供者工厂（apply 时注册，验证阶段再真实调用） */
+  const skillProviders: Array<(control: any) => any> = []
   const listener: { onStep?: (payload: { agent: unknown }, next: () => Promise<undefined>) => Promise<unknown> } = {}
   /** 本次 sync 后该会话注册的最近一条文本（同会话换文本会先 dispose 再注册）。 */
   let lastTextByAgent = new WeakMap<object, string>()
@@ -690,7 +721,11 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
       warn: (message: string) => console.log(`    [plugin:warn] ${message}`),
     },
     tools: { register: (definition: any) => { tools.set(definition.name, definition); return () => {} } },
-    skills: { register: (skill: any) => { skills.set(skill.name, skill); return () => {} } },
+    skills: {
+      register: (skill: any) => { skills.set(skill.name, skill); return () => {} },
+      // 节点技能提供者：记录工厂并真实调用一次，验证它按 cwd 给出/不给候选
+      registerProvider: (create: any) => { skillProviders.push(create); return () => {} },
+    },
     workingDirectory: { ensure: async () => currentCwd.value },
     agents: { list: () => [agent] },
     on: (event: string, handler: any) => {
@@ -745,7 +780,7 @@ async function loadPluginWithFakes(): Promise<FakePlugin> {
     return lastTextByAgent.get(agent) ?? ''
   }
 
-  return { tools, skills, requests, workspace, call, promptTextAfterSync }
+  return { tools, skills, requests, workspace, call, promptTextAfterSync, skillProviders }
 }
 
 /**

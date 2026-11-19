@@ -27,6 +27,7 @@ import { loadBundledSkill, SKILL_NAME } from './skill.ts'
 import { CONFIG_FIELDS, resolveSettings, validateConfig } from './settings.ts'
 import type { Config, Settings } from './settings.ts'
 import { registerTools, TOOL_NAMES } from './tools.ts'
+import { nodeSkillProvider } from './node-skills.ts'
 import { NodeDirectory } from './workbench.ts'
 
 export { CONFIG_FIELDS } from './settings.ts'
@@ -89,7 +90,34 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger.warn(`workbench: 内置技能 ${SKILL_NAME} 注册失败：${errorText(error)}`)
   }
 
-  // ---- 3. 节点上下文 prompt 段 ----
+  // ---- 3. 节点自定义技能 ----
+  // 节点上配置的技能（可多个，按配置顺序）以「快照版本」提供给模型：目录只给元数据，
+  // 正文由 DSH 的 skill 工具首次调用时经 `/internal/.../skills/{position}` 读取，
+  // 因此不会把其他项目的技能暴露给本会话，也不把正文塞进 prompt。
+  // provider 注册在插件全局层：每次 list 都按 cwd 现算当前节点，节点推进后自动跟着变。
+  try {
+    ctx.skills.registerProvider(() => ({
+      name: 'workbench-node-skills',
+      async list({ cwd, signal }) {
+        // 非需求 workspace（或解析不出当前节点）时返回空：普通会话不该看到节点技能
+        const context = await directory.resolveNodeByCwd(cwd, signal)
+        if (context === undefined) return []
+        const delegates = nodeSkillProvider(client, context)
+        return delegates.list({ cwd, signal })
+      },
+      async get(candidate, { cwd, signal }) {
+        const context = await directory.resolveNodeByCwd(cwd, signal)
+        if (context === undefined) return undefined
+        if (candidate.provider !== 'workbench-node-skills') return undefined
+        return nodeSkillProvider(client, context).get(candidate, { cwd, signal })
+      },
+    }))
+    ctx.logger.info('workbench: 已注册节点技能提供者（按节点快照版本）')
+  } catch (error) {
+    ctx.logger.warn(`workbench: 节点技能提供者注册失败：${errorText(error)}`)
+  }
+
+  // ---- 4. 节点上下文 prompt 段 ----
   // 文本按会话 cwd 求值：属于需求 workspace 时给一行指令，否则空串（等于不出现）。
   // 需要的节点名 / seq / total / 技能名只在 `/context` 里有，所以先同步解析 cwd（0 次网络），
   // 属于需求 workspace 才去问后端；普通会话一次网络请求都不发。
