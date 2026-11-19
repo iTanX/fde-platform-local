@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- workbench-dao：MyBatis Mapper、Entity、数据库配置 -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.fde</groupId>
+        <artifactId>workbench-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>workbench-dao</artifactId>
+    <name>workbench-dao</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fde</groupId>
+            <artifactId>workbench-common</artifactId>
+        </dependency>
+        <!-- MyBatis + Spring Boot 自动配置（含 mybatis、mybatis-spring、spring-jdbc） -->
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+        </dependency>
+        <!-- MySQL 5.7 / 8.0 驱动 -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+</project>

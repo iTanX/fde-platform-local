@@ -1,0 +1,70 @@
+# ============================================================
+# Web 工作台后端配置（T0-1 骨架）
+# 敏感信息一律从环境变量读取，仓库中不得出现明文密码：
+#   FDE_DB_PASSWORD   MySQL 密码（必填）
+#   FDE_JWT_SECRET    JWT HS256 密钥（本地有默认占位，生产必须覆盖）
+# ============================================================
+server:
+  port: 8081
+  address: 127.0.0.1
+
+spring:
+  application:
+    name: workbench
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 会话时区统一 +08:00（对应 docs/database.md §1）；密码来自环境变量
+    url: jdbc:mysql://192.168.2.125:3306/fde_workbench?sessionVariables=time_zone='%2B08:00'&serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: ${FDE_DB_PASSWORD}
+    hikari:
+      pool-name: workbench-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+      # 启动不失败：数据库不可用时 /api/health 返回 db=down，而不是应用起不来
+      initialization-fail-timeout: -1
+  jackson:
+    # 时间字段统一 JSR-310（ISO-8601 带时区偏移），与 api.md §1.4 的示例一致
+    serialization:
+      write-dates-as-timestamps: false
+    date-format: "yyyy-MM-dd'T'HH:mm:ssXXX"
+    time-zone: Asia/Shanghai
+    default-property-inclusion: always
+  sql:
+    init:
+      # 库已由 docs/database/001_init.sql 建好，应用不做任何建表
+      mode: never
+
+# ---------- MyBatis ----------
+mybatis:
+  # 下划线转驼峰：user_name -> userName
+  configuration:
+    map-underscore-to-camel-case: true
+  # Mapper XML 位置（本阶段无 XML，目录保留给 T1-1）
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.fde.workbench.dao.entity
+
+# ---------- 安全 ----------
+security:
+  jwt:
+    secret: ${FDE_JWT_SECRET:workbench-local-dev-secret-please-change-0123456789}
+    expire-hours: 12
+
+# ---------- 业务配置（docs/architecture.md §10） ----------
+fde:
+  workbench:
+    storage-root: ./data
+    internal-token: ${FDE_INTERNAL_TOKEN:change-me}
+    max-upload-bytes: 20971520
+    node-output-max-bytes: 10485760
+
+# ---------- 应用版本（由 build-info.properties 提供） ----------
+info:
+  app:
+    version: @project.version@
+
+logging:
+  level:
+    root: info
+    com.fde.workbench: info

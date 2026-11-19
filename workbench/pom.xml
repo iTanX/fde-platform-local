@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Web 工作台 Java 后端 —— Maven 父工程（聚合 + 统一版本管理）。
+
+  模块依赖方向（单向，不允许反向）：app → api → service → dao → common
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- 继承 Spring Boot 3.2.x，统一管理 Spring / Jackson / 测试等依赖版本 -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.12</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.fde</groupId>
+    <artifactId>workbench-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>workbench-parent</name>
+    <description>Web 工作台 Java 后端多模块父工程</description>
+
+    <modules>
+        <module>workbench-common</module>
+        <module>workbench-dao</module>
+        <module>workbench-service</module>
+        <module>workbench-api</module>
+        <module>workbench-app</module>
+    </modules>
+
+    <properties>
+        <!-- 以 JDK 17 为编译目标，兼容更高版本 JDK 运行 -->
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <!-- 各模块内部依赖版本 -->
+        <workbench.version>${project.version}</workbench.version>
+        <mybatis-spring-boot.version>3.0.5</mybatis-spring-boot.version>
+        <!-- JWT 库（Spring Boot BOM 不管理，需显式指定） -->
+        <jjwt.version>0.12.6</jjwt.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- 本工程各模块 -->
+            <dependency>
+                <groupId>com.fde</groupId>
+                <artifactId>workbench-common</artifactId>
+                <version>${workbench.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fde</groupId>
+                <artifactId>workbench-dao</artifactId>
+                <version>${workbench.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fde</groupId>
+                <artifactId>workbench-service</artifactId>
+                <version>${workbench.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fde</groupId>
+                <artifactId>workbench-api</artifactId>
+                <version>${workbench.version}</version>
+            </dependency>
+            <!-- 第三方依赖：MyBatis 启动器（内部已带入 mybatis / mybatis-spring） -->
+            <dependency>
+                <groupId>org.mybatis.spring.boot</groupId>
+                <artifactId>mybatis-spring-boot-starter</artifactId>
+                <version>${mybatis-spring-boot.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-api</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- 显式指定编译器版本，避免本机 settings.xml 中 JDK 相关 profile 干扰 -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <release>${java.version}</release>
+                        <encoding>UTF-8</encoding>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>
