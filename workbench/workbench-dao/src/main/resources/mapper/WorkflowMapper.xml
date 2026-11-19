@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  流程相关五张表的 SQL（docs/api.md §6，docs/database/001_init.sql §5）：
+    wb_workflow / wb_workflow_node / wb_workflow_node_skill / wb_node_input_item / wb_node_output_item
+
+  外键（全部 RESTRICT，脚本未写 ON DELETE）：
+    wb_workflow_node.workflow_id       → wb_workflow.id              (fk_node_workflow)
+    wb_workflow_node_skill.node_id     → wb_workflow_node.id         (fk_node_skill_node)
+    wb_workflow_node_skill.skill_id    → wb_skill.id                 (fk_node_skill_skill)
+    wb_node_input_item.node_id         → wb_workflow_node.id         (fk_input_item_node)
+    wb_node_output_item.node_id        → wb_workflow_node.id         (fk_output_item_node)
+    wb_requirement.workflow_id         → wb_workflow.id              (fk_requirement_workflow)
+  => 删节点前必须先删技能关联 / 输入项 / 输出项；流程只做逻辑删除，不动节点。
+
+  乐观锁：wb_workflow 没有 revision 列（001_init.sql），所有写操作以 updated_at 相等为并发条件；
+  Service 负责把请求里的 revision（= updated_at 毫秒时间戳）换算成本表比较用的 DATETIME(3)。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.WorkflowMapper">
+
+    <!-- 流程字段映射 -->
+    <resultMap id="WorkflowMap" type="com.fde.workbench.dao.entity.Workflow">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="deleted" column="deleted"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 流程 + 节点数 -->
+    <resultMap id="WorkflowWithStatsMap" extends="WorkflowMap"
+               type="com.fde.workbench.dao.entity.WorkflowWithStats">
+        <result property="nodeCount" column="node_count"/>
+    </resultMap>
+
+    <resultMap id="NodeMap" type="com.fde.workbench.dao.entity.WorkflowNode">
+        <id property="id" column="id"/>
+        <result property="workflowId" column="workflow_id"/>
+        <result property="seq" column="seq"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="inputType" column="input_type"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!--
+      节点详情展平行：节点 LEFT JOIN 三类子项。
+      同一个节点若有 2 个输出项、1 个输入项、2 个技能，会得到 4 行的笛卡尔积；
+      Service 归并时按各类子项的 id 去重，因此这里只需要保证各列本身正确、整体按节点 seq 排序。
+    -->
+    <resultMap id="NodeRowMap" type="com.fde.workbench.dao.entity.WorkflowNodeRow">
+        <result property="nodeId" column="node_id"/>
+        <result property="nodeSeq" column="node_seq"/>
+        <result property="nodeName" column="node_name"/>
+        <result property="nodeDescription" column="node_description"/>
+        <result property="nodeInputType" column="node_input_type"/>
+        <result property="skillId" column="skill_id"/>
+        <result property="skillName" column="skill_name"/>
+        <result property="skillSeq" column="skill_seq"/>
+        <result property="inputItemId" column="input_item_id"/>
+        <result property="inputSeq" column="input_seq"/>
+        <result property="inputName" column="input_name"/>
+        <result property="inputDescription" column="input_description"/>
+        <result property="inputFileKind" column="input_file_kind"/>
+        <result property="inputRequired" column="input_required"/>
+        <result property="outputItemId" column="output_item_id"/>
+        <result property="outputSeq" column="output_seq"/>
+        <result property="outputItemKey" column="output_item_key"/>
+        <result property="outputName" column="output_name"/>
+        <result property="outputDescription" column="output_description"/>
+        <result property="outputFileKind" column="output_file_kind"/>
+        <result property="outputRequired" column="output_required"/>
+    </resultMap>
+
+    <sql id="WorkflowColumns">
+        w.id, w.project_id, w.name, w.description, w.created_by, w.deleted, w.created_at, w.updated_at
+    </sql>
+
+    <!-- ==================== 流程 ==================== -->
+
+    <!-- 节点数用相关子查询：一个流程的节点数取决于 seq 而不是行数，不会因 LEFT JOIN 放大 -->
+    <select id="selectByProject" resultMap="WorkflowWithStatsMap">
+        SELECT <include refid="WorkflowColumns"/>,
+               (SELECT COUNT(*) FROM wb_workflow_node n WHERE n.workflow_id = w.id) AS node_count
+          FROM wb_workflow w
+         WHERE w.project_id = #{projectId}
+           AND w.deleted = 0
+         ORDER BY w.created_at DESC, w.id DESC
+    </select>
+
+    <select id="selectById" resultMap="WorkflowMap">
+        SELECT <include refid="WorkflowColumns"/>
+          FROM wb_workflow w
+         WHERE w.id = #{id}
+           AND w.deleted = 0
+    </select>
+
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.Workflow"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_workflow (project_id, name, description, created_by, deleted, created_at, updated_at)
+        VALUES (#{projectId}, #{name}, #{description}, #{createdBy}, 0, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <!--
+      updated_at 乐观锁更新：WHERE updated_at = 期望值。
+      使用 <=>（NULL 安全等值）没有意义（updated_at NOT NULL），这里用普通 = 即可；
+      Service 保证传入的 updatedAt 严格大于 expected，否则并发条件永远成立会退化成"后写覆盖"。
+    -->
+    <update id="updateWithRevision">
+        UPDATE wb_workflow
+           SET name = #{name},
+               description = #{description},
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND deleted = 0
+           AND updated_at = #{expected}
+    </update>
+
+    <update id="touchUpdatedAt">
+        UPDATE wb_workflow
+           SET updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND deleted = 0
+           AND updated_at = #{expected}
+    </update>
+
+    <!-- 逻辑删除：只改标记，节点与子项保留（历史需求、追溯、以及改名前的编排都还能查） -->
+    <update id="markDeleted">
+        UPDATE wb_workflow
+           SET deleted = 1,
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND deleted = 0
+           AND updated_at = #{expected}
+    </update>
+
+    <!-- ==================== 节点 ==================== -->
+
+    <select id="selectNodesByWorkflow" resultMap="NodeMap">
+        SELECT id, workflow_id, seq, name, description, input_type, created_at, updated_at
+          FROM wb_workflow_node
+         WHERE workflow_id = #{workflowId}
+         ORDER BY seq ASC, id ASC
+    </select>
+
+    <select id="selectNodeDetails" resultMap="NodeRowMap">
+        SELECT n.id           AS node_id,
+               n.seq          AS node_seq,
+               n.name         AS node_name,
+               n.description  AS node_description,
+               n.input_type   AS node_input_type,
+               s.id           AS skill_id,
+               s.name         AS skill_name,
+               ns.seq         AS skill_seq,
+               i.id           AS input_item_id,
+               i.seq          AS input_seq,
+               i.name         AS input_name,
+               i.description  AS input_description,
+               i.file_kind    AS input_file_kind,
+               i.required     AS input_required,
+               o.id           AS output_item_id,
+               o.seq          AS output_seq,
+               o.item_key     AS output_item_key,
+               o.name         AS output_name,
+               o.description  AS output_description,
+               o.file_kind    AS output_file_kind,
+               o.required     AS output_required
+          FROM wb_workflow_node n
+          LEFT JOIN wb_workflow_node_skill ns ON ns.node_id = n.id
+          LEFT JOIN wb_skill s ON s.id = ns.skill_id
+          LEFT JOIN wb_node_input_item i ON i.node_id = n.id
+          LEFT JOIN wb_node_output_item o ON o.node_id = n.id
+         WHERE n.workflow_id = #{workflowId}
+         ORDER BY n.seq ASC, n.id ASC, ns.seq ASC, i.seq ASC, o.seq ASC
+    </select>
+
+    <insert id="insertNode" parameterType="com.fde.workbench.dao.entity.WorkflowNode"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_workflow_node (workflow_id, seq, name, description, input_type, created_at, updated_at)
+        VALUES (#{workflowId}, #{seq}, #{name}, #{description}, #{inputType}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <!-- 更新节点内容；seq 不在这里改（见 updateNodeSeqs 的三步法说明） -->
+    <update id="updateNodeContent" parameterType="com.fde.workbench.dao.entity.WorkflowNode">
+        UPDATE wb_workflow_node
+           SET name = #{name},
+               description = #{description},
+               input_type = #{inputType},
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND workflow_id = #{workflowId}
+    </update>
+
+    <!--
+      批量写 seq：uk_node_workflow_seq(workflow_id, seq) 是唯一（普通索引）约束，
+      MySQL 在一条 UPDATE 内部是逐行改、逐行校验唯一性的，所以"目标值"不能等于"本批里还没处理的行
+      当前占用的值"。调用方（WorkflowService#reassignSeqs）因此分两步：
+        ① 把该流程【全部】节点（含即将删除的）写进一段全新的负数区；
+        ② 再把保留的节点写回 1..n。
+      第一步按 seq 顺序递减赋负值、第二步按目标序号从大到小下发，这样无论 MySQL 实际按哪个方向扫行，
+      中间态都不会出现重复值（负数区固定从 -1 起算、或赋值方向写反时都实测撞过重复键）。
+      本语句只更新传入的 id，不会碰到其它流程。
+      updated_at 也随 seq 一起刷新：seq 变了就是"节点被改过"。显式传参而不是用 NOW(3)：
+      NOW(3) 是"语句开始时间"，若同一事务里先写节点再写流程 updated_at，两者会落到同一毫秒，
+      导致"保存节点后流程 revision 没变"；Service 统一生成严格递增时间（见 WorkflowService#nextStamp）。
+    -->
+    <update id="updateNodeSeqs">
+        UPDATE wb_workflow_node
+           SET seq = CASE id
+               <foreach collection="nodes" item="node">
+                   WHEN #{node.id} THEN #{node.seq}
+               </foreach>
+               ELSE seq END,
+               updated_at = #{updatedAt}
+         WHERE workflow_id = #{workflowId}
+           AND id IN
+           <foreach collection="nodes" item="node" open="(" separator="," close=")">
+               #{node.id}
+           </foreach>
+    </update>
+
+    <delete id="deleteNodes">
+        DELETE FROM wb_workflow_node
+         WHERE workflow_id = #{workflowId}
+           AND id IN
+           <foreach collection="nodeIds" item="nodeId" open="(" separator="," close=")">
+               #{nodeId}
+           </foreach>
+    </delete>
+
+    <!-- ==================== 技能关联 ==================== -->
+
+    <!-- 级联删除第 1 步：技能关联是三张子表里唯一还有"外键指向技能"的一张，先删它 -->
+    <delete id="deleteNodeSkills">
+        DELETE FROM wb_workflow_node_skill
+         WHERE node_id IN
+           <foreach collection="nodeIds" item="nodeId" open="(" separator="," close=")">
+               #{nodeId}
+           </foreach>
+    </delete>
+
+    <delete id="deleteNodeSkillsByWorkflow">
+        DELETE ns
+          FROM wb_workflow_node_skill ns
+          JOIN wb_workflow_node n ON n.id = ns.node_id
+         WHERE n.workflow_id = #{workflowId}
+    </delete>
+
+    <insert id="insertNodeSkill" parameterType="com.fde.workbench.dao.entity.WorkflowNodeSkill"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_workflow_node_skill (node_id, skill_id, seq)
+        VALUES (#{nodeId}, #{skillId}, #{seq})
+    </insert>
+
+    <!-- ==================== 固定输入项 ==================== -->
+
+    <!-- 级联删除第 2 步 -->
+    <delete id="deleteInputItems">
+        DELETE FROM wb_node_input_item
+         WHERE node_id IN
+           <foreach collection="nodeIds" item="nodeId" open="(" separator="," close=")">
+               #{nodeId}
+           </foreach>
+    </delete>
+
+    <delete id="deleteInputItemsByWorkflow">
+        DELETE i
+          FROM wb_node_input_item i
+          JOIN wb_workflow_node n ON n.id = i.node_id
+         WHERE n.workflow_id = #{workflowId}
+    </delete>
+
+    <insert id="insertInputItem" parameterType="com.fde.workbench.dao.entity.NodeInputItem"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_node_input_item (node_id, seq, name, description, file_kind, required, created_at)
+        VALUES (#{nodeId}, #{seq}, #{name}, #{description}, #{fileKind}, #{required}, #{createdAt})
+    </insert>
+
+    <!-- ==================== 固定输出项 ==================== -->
+
+    <!-- 级联删除第 2 步 -->
+    <delete id="deleteOutputItems">
+        DELETE FROM wb_node_output_item
+         WHERE node_id IN
+           <foreach collection="nodeIds" item="nodeId" open="(" separator="," close=")">
+               #{nodeId}
+           </foreach>
+    </delete>
+
+    <delete id="deleteOutputItemsByWorkflow">
+        DELETE o
+          FROM wb_node_output_item o
+          JOIN wb_workflow_node n ON n.id = o.node_id
+         WHERE n.workflow_id = #{workflowId}
+    </delete>
+
+    <insert id="insertOutputItem" parameterType="com.fde.workbench.dao.entity.NodeOutputItem"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_node_output_item (node_id, seq, item_key, name, description, file_kind, required, created_at)
+        VALUES (#{nodeId}, #{seq}, #{itemKey}, #{name}, #{description}, #{fileKind}, #{required}, #{createdAt})
+    </insert>
+
+</mapper>

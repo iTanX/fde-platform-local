@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  需求表 wb_requirement 的只读 SQL（T3-1 只引入引用计数一条）。
+
+  为什么流程删除要查这张表：wb_requirement.workflow_id 指向 wb_workflow.id（fk_requirement_workflow，RESTRICT），
+  但"流程删除"本身是 UPDATE deleted=1，不会触发外键——所以必须显式计数，口径见 api.md §6：
+  被需求引用 → 409/10403。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.RequirementMapper">
+
+    <!-- 引用计数：任何状态的需求都算（已完成需求仍要能追溯来源流程） -->
+    <select id="countByWorkflowId" resultType="long">
+        SELECT COUNT(*)
+          FROM wb_requirement
+         WHERE workflow_id = #{workflowId}
+    </select>
+
+</mapper>

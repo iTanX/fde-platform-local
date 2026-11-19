@@ -20,6 +20,19 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
+        <!--
+          T3-1：RevisionStamp 的整数序列化 / 反序列化需要自定义 Serializer、Deserializer
+          （jackson-annotations 只有注解，没有 JsonGenerator / StdSerializer）。只依赖 core + databind，
+          仍然不引入 Web 容器。
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
         <!-- JWT 签发与校验 -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>

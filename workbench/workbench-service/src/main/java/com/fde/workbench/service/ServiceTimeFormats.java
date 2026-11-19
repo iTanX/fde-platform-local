@@ -19,7 +19,7 @@ import java.time.ZoneId;
 public final class ServiceTimeFormats {
 
     /** 业务时区：与 JDBC 会话时区、application.yml 的 jackson.time-zone 保持一致 */
-    static final ZoneId BIZ_ZONE = ZoneId.of("Asia/Shanghai");
+    public static final ZoneId BIZ_ZONE = ZoneId.of("Asia/Shanghai");
 
     private ServiceTimeFormats() {
     }
