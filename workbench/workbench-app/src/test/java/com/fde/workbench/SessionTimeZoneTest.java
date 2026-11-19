@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * 本测试直接对真实数据库执行 {@code SELECT @@session.time_zone}，并验证 MyBatis / JdbcTemplate
  * 两条访问路径看到的是同一时区。
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=" + TestDatabases.URL)
 class SessionTimeZoneTest {
 
     /** 期望的会话时区（docs/database.md §1） */

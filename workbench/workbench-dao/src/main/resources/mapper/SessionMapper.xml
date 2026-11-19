@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  会话的 SQL（docs/api.md §9、docs/database/001_init.sql §8）：
+    wb_agent_session / wb_session_runtime_info / wb_node_session_link
+
+  默认会话解析（docs/api.md §9「节点默认会话解析顺序」，PRD AC-F7.2/F7.4）：
+    1) wb_requirement_node.primary_session_id（由 SessionService 直接读节点行，不在本文件里）；
+    2) 需求下 archived = 0 且 last_active_at 最大 → selectMostActiveByRequirement；
+    3) 都没有 → null（前端进入"新建会话"流程）。
+  这里统一排除 archived=1：归档会话仍可在列表里看到，但不再作为默认打开对象。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.SessionMapper">
+
+    <resultMap id="AgentSessionMap" type="com.fde.workbench.dao.entity.AgentSession">
+        <id property="id" column="id"/>
+        <result property="requirementId" column="requirement_id"/>
+        <result property="dshSessionId" column="dsh_session_id"/>
+        <result property="dshWorkspacePath" column="dsh_workspace_path"/>
+        <result property="title" column="title"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="lastActiveAt" column="last_active_at"/>
+        <result property="archived" column="archived"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="SessionColumns">
+        id, requirement_id, dsh_session_id, dsh_workspace_path, title, created_by,
+        last_active_at, archived, created_at, updated_at
+    </sql>
+
+    <insert id="insertSession" parameterType="com.fde.workbench.dao.entity.AgentSession"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_agent_session (requirement_id, dsh_session_id, dsh_workspace_path, title, created_by,
+                                      last_active_at, archived, created_at, updated_at)
+        VALUES (#{requirementId}, #{dshSessionId}, #{dshWorkspacePath}, #{title}, #{createdBy},
+                #{lastActiveAt}, #{archived}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <insert id="insertRuntimeInfo">
+        INSERT INTO wb_session_runtime_info (agent_session_id, last_node_instance_id, message_count,
+                                             created_at, updated_at)
+        VALUES (#{agentSessionId}, #{lastNodeInstanceId}, 0, #{now}, #{now})
+    </insert>
+
+    <!-- 弱关联允许"同一会话在同一节点重复登记"：已存在则跳过，不报错 -->
+    <insert id="insertNodeSessionLink">
+        INSERT IGNORE INTO wb_node_session_link (node_instance_id, agent_session_id, created_at)
+        VALUES (#{nodeInstanceId}, #{agentSessionId}, #{now})
+    </insert>
+
+    <update id="updateLastActive">
+        UPDATE wb_agent_session
+           SET last_active_at = #{now},
+               updated_at     = #{now}
+         WHERE id = #{id}
+    </update>
+
+    <select id="selectById" resultMap="AgentSessionMap">
+        SELECT <include refid="SessionColumns"/>
+          FROM wb_agent_session
+         WHERE id = #{id}
+    </select>
+
+    <select id="selectByDshSessionId" resultMap="AgentSessionMap">
+        SELECT <include refid="SessionColumns"/>
+          FROM wb_agent_session
+         WHERE dsh_session_id = #{dshSessionId}
+    </select>
+
+    <select id="selectByRequirement" resultMap="AgentSessionMap">
+        SELECT <include refid="SessionColumns"/>
+          FROM wb_agent_session
+         WHERE requirement_id = #{requirementId}
+         ORDER BY last_active_at DESC, id DESC
+    </select>
+
+    <!-- 默认会话第 2 条：未归档里最近活跃的一个；last_active_at 相同用 id 兜底保证确定性 -->
+    <select id="selectMostActiveByRequirement" resultMap="AgentSessionMap">
+        SELECT <include refid="SessionColumns"/>
+          FROM wb_agent_session
+         WHERE requirement_id = #{requirementId}
+           AND archived = 0
+         ORDER BY last_active_at DESC, id DESC
+         LIMIT 1
+    </select>
+
+</mapper>

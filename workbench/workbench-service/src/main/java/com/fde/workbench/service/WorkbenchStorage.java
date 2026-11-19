@@ -230,7 +230,7 @@ public class WorkbenchStorage {
             candidate = candidate.resolve(segment);
         }
         if (!candidate.normalize().startsWith(base)) {
-            throw reject(relativePath, "路径越出版本目录");
+            throw reject(relativePath, "路径越出目标目录");
         }
         return candidate;
     }
@@ -269,6 +269,31 @@ public class WorkbenchStorage {
             throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "存储目录创建失败");
         }
         return dir;
+    }
+
+    /**
+     * 确保存储根下的某个目录存在（已存在直接返回），并做软链校验。
+     * <p>
+     * 与 {@link #createDir(String)} 的区别：本方法接受<b>绝对路径</b>（调用方已经从
+     * workspace 解析出绝对目录），内部再校验它仍在存储根内。T5-1 的
+     * {@code <ws>/.workbench/<nodeInstanceId>/}、{@code <ws>/inputs/<seq>/} 用它创建。
+     *
+     * @param dir 根内的目录绝对路径
+     * @return 目录绝对路径
+     * @throws BizException 路径越出根 / 经过符号链接 → 400/10001；创建失败 → 502/19902
+     */
+    public Path createDirWithin(Path dir) {
+        Path normalized = dir.toAbsolutePath().normalize();
+        if (!normalized.startsWith(root)) {
+            throw reject(dir.toString(), "路径越出存储根");
+        }
+        requireNoSymlink(normalized);
+        try {
+            Files.createDirectories(normalized);
+        } catch (IOException ex) {
+            throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "存储目录创建失败：" + normalized);
+        }
+        return normalized;
     }
 
     /**

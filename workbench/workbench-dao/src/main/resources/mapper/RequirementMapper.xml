@@ -196,6 +196,67 @@
          WHERE requirement_id = #{requirementId}
     </select>
 
+    <!-- 按主键取节点实例（T5-1）：走 uk 主键，一次取全快照列与推进状态 -->
+    <select id="selectNodeById" resultMap="RequirementNodeMap">
+        SELECT id, requirement_id, workflow_node_id, seq, name, description, input_type,
+               inputs_snapshot, outputs_snapshot, skills_snapshot, primary_session_id, status,
+               started_at, completed_at, completed_by, created_at
+          FROM wb_requirement_node
+         WHERE id = #{id}
+    </select>
+
+    <!--
+      推进：当前节点 done。completed_by 只在为空时写——保留"第一次完成它的人"，
+      补写 / 重复调用不会把完成人改成后来的调用方。
+      只对 status='current' 的行生效：并发下只有一个事务能把节点从 current 改走。
+    -->
+    <update id="markNodeDone">
+        UPDATE wb_requirement_node
+           SET status = 'done',
+               completed_at = COALESCE(completed_at, #{now}),
+               completed_by = COALESCE(completed_by, #{completedBy})
+         WHERE id = #{id}
+           AND status = 'current'
+    </update>
+
+    <!-- 推进：下一节点 waiting → current，写 started_at（已 started_at 时不覆盖） -->
+    <update id="markNodeCurrent">
+        UPDATE wb_requirement_node
+           SET status = 'current',
+               started_at = COALESCE(started_at, #{now})
+         WHERE id = #{id}
+           AND status = 'waiting'
+    </update>
+
+    <!--
+      需求 current_seq + 1。条件里带上当前值（current_seq < 总节点数才前进），
+      防止"最后一个节点已完成又被提交一次"时把 current_seq 推到节点数之外。
+    -->
+    <update id="advanceCurrentSeq">
+        UPDATE wb_requirement r
+           SET r.current_seq = r.current_seq + 1,
+               r.updated_at = #{now}
+         WHERE r.id = #{id}
+           AND r.current_seq &lt; (SELECT node_max_seq FROM
+                                   (SELECT MAX(seq) AS node_max_seq FROM wb_requirement_node WHERE requirement_id = #{id})
+                                  AS node_max)
+    </update>
+
+    <update id="markRequirementCompleted">
+        UPDATE wb_requirement
+           SET status = 'completed',
+               updated_at = #{now}
+         WHERE id = #{id}
+    </update>
+
+    <!-- 只在 primary_session_id 为空时绑定（PRD AC-X2.1：已绑定过的节点不被新会话抢走） -->
+    <update id="bindPrimarySessionIfAbsent">
+        UPDATE wb_requirement_node
+           SET primary_session_id = #{sessionId}
+         WHERE id = #{id}
+           AND primary_session_id IS NULL
+    </update>
+
     <delete id="deleteNodesByRequirement">
         DELETE FROM wb_requirement_node
          WHERE requirement_id = #{requirementId}

@@ -54,7 +54,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>删除后节点实例级联清理（含会话三张表），revision 过期 → 409/10402。</li>
  * </ol>
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=" + TestDatabases.URL)
 @AutoConfigureMockMvc
 class RequirementApiTest {
 

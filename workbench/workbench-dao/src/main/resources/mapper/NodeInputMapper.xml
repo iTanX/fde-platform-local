@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  节点输入文件的 SQL（docs/api.md §8、docs/database/001_init.sql §7 的 wb_requirement_node_input）。
+
+  外键：node_instance_id → wb_requirement_node.id、file_id → wb_file.id（均为 RESTRICT），
+  所以删除顺序必须是"输入记录 → 文件行 → 节点"；需求删除时由 RequirementService 按此顺序清理。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.NodeInputMapper">
+
+    <!-- 展示字段来自 join wb_file：列表页一次查询拿全，避免逐条回查 -->
+    <resultMap id="NodeInputFileMap" type="com.fde.workbench.dao.entity.NodeInputFile">
+        <id property="id" column="id"/>
+        <result property="nodeInstanceId" column="node_instance_id"/>
+        <result property="inputItemId" column="input_item_id"/>
+        <result property="fileId" column="file_id"/>
+        <result property="uploadedBy" column="uploaded_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="originalName" column="original_name"/>
+        <result property="sizeBytes" column="size_bytes"/>
+        <result property="sha256" column="sha256"/>
+        <result property="storageRelPath" column="storage_rel_path"/>
+    </resultMap>
+
+    <sql id="NodeInputJoin">
+        SELECT i.id, i.node_instance_id, i.input_item_id, i.file_id, i.uploaded_by, i.created_at,
+               f.original_name, f.size_bytes, f.sha256, f.storage_rel_path
+          FROM wb_requirement_node_input i
+          JOIN wb_file f ON f.id = i.file_id
+    </sql>
+
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.NodeInputFile"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_requirement_node_input (node_instance_id, input_item_id, file_id, uploaded_by, created_at)
+        VALUES (#{nodeInstanceId}, #{inputItemId}, #{fileId}, #{uploadedBy}, #{createdAt})
+    </insert>
+
+    <select id="selectById" resultMap="NodeInputFileMap">
+        <include refid="NodeInputJoin"/>
+         WHERE i.id = #{id}
+    </select>
+
+    <select id="selectByNode" resultMap="NodeInputFileMap">
+        <include refid="NodeInputJoin"/>
+         WHERE i.node_instance_id = #{nodeInstanceId}
+         ORDER BY i.id ASC
+    </select>
+
+    <select id="countByNode" resultType="int">
+        SELECT COUNT(*)
+          FROM wb_requirement_node_input
+         WHERE node_instance_id = #{nodeInstanceId}
+    </select>
+
+    <select id="countByNodeAndItem" resultType="int">
+        SELECT COUNT(*)
+          FROM wb_requirement_node_input
+         WHERE node_instance_id = #{nodeInstanceId}
+           AND input_item_id = #{inputItemId}
+    </select>
+
+    <!-- 三列一起限定：即使拿到别人的记录 ID，也删不掉别人节点下的数据 -->
+    <delete id="deleteById">
+        DELETE FROM wb_requirement_node_input
+         WHERE id = #{id}
+           AND node_instance_id = #{nodeInstanceId}
+           AND file_id = #{fileId}
+    </delete>
+
+    <delete id="deleteByRequirement">
+        DELETE i
+          FROM wb_requirement_node_input i
+          JOIN wb_requirement_node n ON n.id = i.node_instance_id
+         WHERE n.requirement_id = #{requirementId}
+    </delete>
+
+</mapper>

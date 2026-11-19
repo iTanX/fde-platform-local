@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  文件登记的 SQL（docs/api.md §10、docs/database/001_init.sql §7 的 wb_file）。
+
+  写入顺序（T5-1 上传 / 提交产出共用，见 FileMapper 接口注释）：
+    ① insert 出文件行拿到 wb_file.id（business 记录需要它做外键）
+    ② insert 业务记录（wb_requirement_node_input / wb_requirement_node_output）
+    ③ updateRef 回填 ref_type / ref_id
+  三步在同一个事务里，不会出现"文件行指向不存在的业务记录"。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.FileMapper">
+
+    <resultMap id="FileRecordMap" type="com.fde.workbench.dao.entity.FileRecord">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="requirementId" column="requirement_id"/>
+        <result property="refType" column="ref_type"/>
+        <result property="refId" column="ref_id"/>
+        <result property="originalName" column="original_name"/>
+        <result property="storageRelPath" column="storage_rel_path"/>
+        <result property="mimeType" column="mime_type"/>
+        <result property="sizeBytes" column="size_bytes"/>
+        <result property="sha256" column="sha256"/>
+        <result property="uploadedBy" column="uploaded_by"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <sql id="FileColumns">
+        id, project_id, requirement_id, ref_type, ref_id, original_name, storage_rel_path,
+        mime_type, size_bytes, sha256, uploaded_by, created_at
+    </sql>
+
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.FileRecord"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_file (project_id, requirement_id, ref_type, ref_id, original_name,
+                             storage_rel_path, mime_type, size_bytes, sha256, uploaded_by, created_at)
+        VALUES (#{projectId}, #{requirementId}, #{refType}, #{refId}, #{originalName},
+                #{storageRelPath}, #{mimeType}, #{sizeBytes}, #{sha256}, #{uploadedBy}, #{createdAt})
+    </insert>
+
+    <select id="selectById" resultMap="FileRecordMap">
+        SELECT <include refid="FileColumns"/>
+          FROM wb_file
+         WHERE id = #{id}
+    </select>
+
+    <!-- 回填业务引用：插入文件行时业务记录还不存在，自增 ID 出来后再指过去（同一事务） -->
+    <update id="updateRef">
+        UPDATE wb_file
+           SET ref_type = #{refType},
+               ref_id = #{refId}
+         WHERE id = #{id}
+    </update>
+
+    <!-- 落盘后回填：路径 / 大小 / 摘要三列一起写，避免"有路径没摘要"的中间态被读到 -->
+    <update id="updateStoredFile">
+        UPDATE wb_file
+           SET storage_rel_path = #{storageRelPath},
+               size_bytes       = #{sizeBytes},
+               sha256           = #{sha256}
+         WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM wb_file
+         WHERE id = #{id}
+    </delete>
+
+    <select id="selectByRequirement" resultMap="FileRecordMap">
+        SELECT <include refid="FileColumns"/>
+          FROM wb_file
+         WHERE requirement_id = #{requirementId}
+         ORDER BY id ASC
+    </select>
+
+    <!--
+      需求物理删除：必须在删 wb_requirement 之前执行（fk_file_requirement RESTRICT），
+      也要在删 wb_requirement_node_input / wb_requirement_node_output 之后执行（它们引用 file_id）。
+    -->
+    <delete id="deleteByRequirement">
+        DELETE FROM wb_file
+         WHERE requirement_id = #{requirementId}
+    </delete>
+
+</mapper>

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  节点输出的 SQL（docs/api.md §11 commit、docs/database/001_init.sql §7 的 wb_requirement_node_output）。
+
+  版本语义（docs/database.md §5.4）：唯一键 uk_node_output_item(node_instance_id, item_key)，
+  一个输出项只有一条"当前版本"；重新提交时 version_no + 1 并改指向新的 wb_file 行，
+  旧的 wb_file 行保留（审计），页面默认只展示当前版本。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.NodeOutputMapper">
+
+    <resultMap id="NodeOutputMap" type="com.fde.workbench.dao.entity.NodeOutputRecord">
+        <id property="id" column="id"/>
+        <result property="nodeInstanceId" column="node_instance_id"/>
+        <result property="outputItemId" column="output_item_id"/>
+        <result property="itemKey" column="item_key"/>
+        <result property="fileId" column="file_id"/>
+        <result property="versionNo" column="version_no"/>
+        <result property="committedBy" column="committed_by"/>
+        <result property="committedAt" column="committed_at"/>
+        <result property="originalName" column="original_name"/>
+        <result property="sizeBytes" column="size_bytes"/>
+    </resultMap>
+
+    <sql id="NodeOutputJoin">
+        SELECT o.id, o.node_instance_id, o.output_item_id, o.item_key, o.file_id, o.version_no,
+               o.committed_by, o.committed_at, f.original_name, f.size_bytes
+          FROM wb_requirement_node_output o
+          JOIN wb_file f ON f.id = o.file_id
+    </sql>
+
+    <!--
+      提交登记（docs/database.md §5.4）：一条语句同时覆盖"首次提交"与"重新提交"。
+      唯一键 uk_node_output_item(node_instance_id, item_key) 命中时走更新分支：版本 +1、换文件。
+      注意：更新分支下 last_insert_id 会被推进成"新分配的 AUTO_INCREMENT"，<b>不是</b>真实主键；
+      调用方用 NodeOutputMapper#selectByNodeAndKey 在同一事务里回读真实行（见接口注释）。
+    -->
+    <insert id="upsertCommit">
+        INSERT INTO wb_requirement_node_output (node_instance_id, output_item_id, item_key, file_id,
+                                                version_no, committed_by, committed_at)
+        VALUES (#{nodeInstanceId}, #{outputItemId}, #{itemKey}, #{fileId}, 1, #{committedBy}, #{committedAt})
+        ON DUPLICATE KEY UPDATE
+            output_item_id = VALUES(output_item_id),
+            file_id        = VALUES(file_id),
+            version_no     = version_no + 1,
+            committed_by   = VALUES(committed_by),
+            committed_at   = VALUES(committed_at)
+    </insert>
+
+    <select id="selectByNode" resultMap="NodeOutputMap">
+        <include refid="NodeOutputJoin"/>
+         WHERE o.node_instance_id = #{nodeInstanceId}
+         ORDER BY o.id ASC
+    </select>
+
+    <select id="selectByNodeAndKey" resultMap="NodeOutputMap">
+        <include refid="NodeOutputJoin"/>
+         WHERE o.node_instance_id = #{nodeInstanceId}
+           AND o.item_key = #{itemKey}
+    </select>
+
+    <delete id="deleteByRequirement">
+        DELETE o
+          FROM wb_requirement_node_output o
+          JOIN wb_requirement_node n ON n.id = o.node_instance_id
+         WHERE n.requirement_id = #{requirementId}
+    </delete>
+
+</mapper>

@@ -16,6 +16,14 @@ public enum ErrorCode {
     /** 参数校验失败 */
     PARAM_INVALID(10001, 400, "参数校验失败"),
 
+    /**
+     * 内部接口令牌缺失或不匹配（T5-1，{@code /internal/**} 专用）。
+     * <p>
+     * api.md §1.3 没有为"内部令牌错误"单列 code，这里在未占用区间新起一个 10103：
+     * 与 10101（用户未登录）区分开，插件侧据此提示"internalToken 配置不对"而不是"请登录"。
+     */
+    INTERNAL_TOKEN_INVALID(10103, 401, "内部接口令牌无效"),
+
     /** 未登录或 token 过期 */
     UNAUTHORIZED(10101, 401, "未登录或 token 过期"),
 

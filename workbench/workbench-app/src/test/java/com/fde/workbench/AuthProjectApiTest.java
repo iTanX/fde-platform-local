@@ -39,7 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <p>
  * 三类用例合在一个类里，是因为它们共享同一个 Spring 上下文（启动一次，避免重复建连）。
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=" + TestDatabases.URL)
 @AutoConfigureMockMvc
 class AuthProjectApiTest {
 

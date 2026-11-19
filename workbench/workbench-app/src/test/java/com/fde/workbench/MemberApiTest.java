@@ -47,7 +47,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>需求 —— 需求创建属于 T3-1，用来构造"成员仍有需求 → 移除必须整体回滚"的场景。</li>
  * </ul>
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=" + TestDatabases.URL)
 @AutoConfigureMockMvc
 class MemberApiTest {
 

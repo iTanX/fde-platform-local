@@ -48,7 +48,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>非创建者且非 owner 编辑 → 403/10202。</li>
  * </ol>
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=" + TestDatabases.URL)
 @AutoConfigureMockMvc
 class WorkflowApiTest {
 

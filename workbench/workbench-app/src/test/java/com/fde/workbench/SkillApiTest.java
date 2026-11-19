@@ -51,7 +51,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code target/test-data}（远离运行目录 workbench/data），并且先清空——避免测试写入污染演示环境的存储目录，
  * 也让"磁盘上没有越界文件"这类断言有一个干净、可预期的起点。
  */
-@SpringBootTest(properties = "fde.workbench.storage-root=target/test-data")
+@SpringBootTest(properties = {"fde.workbench.storage-root=target/test-data",
+        "spring.datasource.url=" + TestDatabases.URL})
 @AutoConfigureMockMvc
 class SkillApiTest {
 

@@ -6,6 +6,7 @@ import com.fde.workbench.common.bo.RevisionStamp;
 import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.common.result.PageResult;
+import com.fde.workbench.dao.entity.FileRecord;
 import com.fde.workbench.dao.entity.ProjectWithStats;
 import com.fde.workbench.dao.entity.Requirement;
 import com.fde.workbench.dao.entity.RequirementNode;
@@ -14,6 +15,9 @@ import com.fde.workbench.dao.entity.Workflow;
 import com.fde.workbench.dao.entity.WorkflowNode;
 import com.fde.workbench.dao.entity.WorkflowNodeRow;
 import com.fde.workbench.dao.entity.WorkflowNodeSkillDetail;
+import com.fde.workbench.dao.mapper.FileMapper;
+import com.fde.workbench.dao.mapper.NodeInputMapper;
+import com.fde.workbench.dao.mapper.NodeOutputMapper;
 import com.fde.workbench.dao.mapper.RequirementMapper;
 import com.fde.workbench.dao.mapper.SkillMapper;
 import com.fde.workbench.dao.mapper.WorkflowMapper;
@@ -29,6 +33,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -43,7 +50,7 @@ import java.util.Set;
  * <p>
  * <b>职责边界</b>：本类负责"需求"这一层——增删改查，以及创建需求时<b>在同一事务内</b>把流程节点
  * 快照成节点实例。会话登记、节点信息页、上传与推进属于 T5-1，本类不创建会话（PRD AC-F1.1 之后
- * 的工作流）。唯一涉及会话表的是"物理删除需求时必须按外键顺序连带清理"，见 {@link #delete}。
+ * 的工作流）。涉及会话表与文件表的只有"物理删除需求时必须按外键顺序连带清理"，见 {@link #delete}。
  * <p>
  * <b>权限判定（统一走 {@link ProjectAccessService}，不另写一套）</b>：
  * <ul>
@@ -105,6 +112,13 @@ public class RequirementService {
 
     private final WorkbenchStorage storage;
 
+    /** T5-1：删除需求时清理节点输入 / 输出与文件登记 */
+    private final NodeInputMapper nodeInputMapper;
+
+    private final NodeOutputMapper nodeOutputMapper;
+
+    private final FileMapper fileMapper;
+
     private final TransactionTemplate transactionTemplate;
 
     /** 快照 JSON 的序列化与解析（结构见 {@link NodeSnapshots}） */
@@ -116,6 +130,9 @@ public class RequirementService {
                               ProjectAccessService projectAccessService,
                               CurrentUserContext currentUserContext,
                               WorkbenchStorage storage,
+                              NodeInputMapper nodeInputMapper,
+                              NodeOutputMapper nodeOutputMapper,
+                              FileMapper fileMapper,
                               TransactionTemplate transactionTemplate,
                               ObjectMapper objectMapper) {
         this.requirementMapper = requirementMapper;
@@ -124,6 +141,9 @@ public class RequirementService {
         this.projectAccessService = projectAccessService;
         this.currentUserContext = currentUserContext;
         this.storage = storage;
+        this.nodeInputMapper = nodeInputMapper;
+        this.nodeOutputMapper = nodeOutputMapper;
+        this.fileMapper = fileMapper;
         this.transactionTemplate = transactionTemplate;
         this.objectMapper = objectMapper;
     }
@@ -423,20 +443,25 @@ public class RequirementService {
      *   <li>{@code wb_requirement_node.primary_session_id = NULL}（解除节点 → 会话外键）；</li>
      *   <li>{@code wb_session_runtime_info}（同时引用会话与节点）；</li>
      *   <li>{@code wb_node_session_link}（节点 × 会话弱关联）；</li>
+     *   <li><b>{@code wb_requirement_node_input} / {@code wb_requirement_node_output}</b>
+     *       （T5-1 写入的节点输入与输出，外键指向节点与 {@code wb_file}）；</li>
      *   <li>{@code wb_requirement_node}；</li>
+     *   <li><b>{@code wb_file}</b>（节点输入 / 输出的文件登记；必须在 4 与 5 之后、需求行之前删，
+     *       因为 {@code fk_node_input_file / fk_node_output_file} 与 {@code fk_file_requirement} 都是 RESTRICT）；</li>
      *   <li>{@code wb_agent_session}；</li>
      *   <li>最后 {@code DELETE FROM wb_requirement WHERE id = ? AND revision = ?}：影响 0 行说明
      *       revision 已过期（或需求已被他人删除），抛 409 让整个事务回滚，前面删掉的东西全部恢复。</li>
      * </ol>
      * 删需求行必须放在最后：它是所有子表的父行，外键 RESTRICT 会挡住"先删父后删子"。
      * <p>
-     * <b>已知边界</b>：节点输入 / 输出记录（{@code wb_requirement_node_input}、
-     * {@code wb_requirement_node_output}、{@code wb_file}）由 T5-1 写入，本任务不提供对应 Mapper，
-     * 因此只要需求下已有这类数据，删节点就会被外键挡住并返回 500/19901（事务整体回滚，不会删一半）。
-     * T5-1 需要在此事务里（或在本方法前）补上这三张表的级联删除，见交接说明。
-     * 提交成功后再尝试删除 workspace 目录（目录非空则保留，见
-     * {@link WorkbenchStorage#deleteRequirementWorkspaceIfEmpty}）：磁盘操作放在事务之外，
-     * 避免"目录已删、事务回滚"造成数据与文件不一致。
+     * <b>T5-1 补齐的缺口</b>：本方法原先只清理节点与会话，若需求下已有上传的输入或已提交的输出，
+     * 删节点会被 {@code fk_node_input_node / fk_node_output_node} 挡住并返回 500（事务整体回滚，
+     * 不会删一半）。现在在第 4 / 6 步补上三张表，删除需求才能真正删干净；
+     * 对应测试见 {@code NodeApiTest#deleteRequirement_cleansInputsOutputsFilesAndSessions}。
+     * <p>
+     * 磁盘文件在<b>事务提交之后</b>删除：先记下 {@code wb_file.storage_rel_path}，提交成功后逐个删
+     * （失败只记日志），避免"目录已删、事务回滚"造成数据与文件不一致；最后尝试删除 workspace 目录
+     * （目录非空则保留，见 {@link WorkbenchStorage#deleteRequirementWorkspaceIfEmpty}）。
      *
      * @param requirementId 需求 ID
      * @param revision      前端持有的 revision（必填）
@@ -446,26 +471,57 @@ public class RequirementService {
         RequirementWithStats requirement = requireOperableRequirement(requirementId);
         int expected = requireRevision(revision);
 
+        // 事务前先记下磁盘路径：事务里删完就查不到了（只读操作，失败无副作用）
+        List<String> filePaths = fileMapper.selectByRequirement(requirementId).stream()
+                .map(FileRecord::getStorageRelPath)
+                .filter(path -> path != null && !path.isBlank())
+                .toList();
+
         int[] removed = transactionTemplate.execute(status -> {
-            // 顺序见方法注释：先解除跨表引用，再删节点，最后删需求行（revision 闸门）
+            // 顺序见方法注释：先解除跨表引用，再删节点与文件，最后删需求行（revision 闸门）
             requirementMapper.clearPrimarySessionByRequirement(requirementId);
             requirementMapper.deleteSessionRuntimeInfoByRequirement(requirementId);
             requirementMapper.deleteNodeSessionLinksByRequirement(requirementId);
+            // T5-1：节点输入 / 输出（引用节点与 wb_file，必须在删节点、删文件之前）
+            nodeInputMapper.deleteByRequirement(requirementId);
+            nodeOutputMapper.deleteByRequirement(requirementId);
             requirementMapper.deleteNodesByRequirement(requirementId);
+            // T5-1：文件登记（节点输入 / 输出；技能包文件 requirement_id 为 NULL，不受影响）
+            int fileCount = fileMapper.deleteByRequirement(requirementId);
             requirementMapper.deleteSessionsByRequirement(requirementId);
             int deleted = requirementMapper.deleteById(requirementId, expected);
             if (deleted != 1) {
                 // 走到这里说明 revision 在本次请求期间被别人改过：抛异常 → 上面所有删除回滚
                 throw revisionConflict(requirementId, expected);
             }
-            return new int[]{deleted};
+            return new int[]{deleted, fileCount};
         });
-        log.info("删除需求（物理删除）：requirementId={}, 删除行数={}", requirementId,
-                removed == null ? 0 : removed[0]);
+        log.info("删除需求（物理删除）：requirementId={}, 需求行={}, 文件登记={}", requirementId,
+                removed == null ? 0 : removed[0], removed == null ? 0 : removed[1]);
 
+        // 事务已提交：再删磁盘文件（失败只记日志，不影响删除结果）
+        filePaths.forEach(this::deleteStoredFileQuietly);
         boolean removedDir = storage.deleteRequirementWorkspaceIfEmpty(requirementId);
         if (!removedDir) {
             log.info("需求 workspace 目录非空，按留存策略保留：requirementId={}", requirementId);
+        }
+    }
+
+    /**
+     * 删除需求时清理单个存储文件（路径经存储根校验，失败只记日志）。
+     * <p>
+     * 为什么不整目录递归删：模型可能在 workspace 里留下大量文件，递归删除是危险操作；
+     * 这里只删"数据库登记过的文件"，其余残留按留存策略保留（与
+     * {@link WorkbenchStorage#deleteRequirementWorkspaceIfEmpty} 的口径一致）。
+     *
+     * @param storageRelPath 相对存储根的路径
+     */
+    private void deleteStoredFileQuietly(String storageRelPath) {
+        try {
+            Path path = storage.resolveWithin(storage.root(), storageRelPath);
+            Files.deleteIfExists(path);
+        } catch (IOException | BizException ex) {
+            log.warn("删除需求时清理文件失败（按留存策略保留）：{}", storageRelPath);
         }
     }
 

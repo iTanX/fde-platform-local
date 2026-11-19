@@ -3,18 +3,21 @@ package com.fde.workbench.api.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fde.workbench.common.security.JwtUtil;
 import com.fde.workbench.api.security.CurrentUserHolder;
+import com.fde.workbench.api.security.InternalAuthFilter;
 import com.fde.workbench.api.security.JwtAuthFilter;
 import com.fde.workbench.api.security.LoginRequiredFilter;
+import com.fde.workbench.service.WorkbenchStorageProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Servlet 过滤器装配：认证（解析 JWT）+ 登录要求（默认拒绝、显式放行）。
+ * Servlet 过滤器装配：认证（解析 JWT）+ 登录要求（默认拒绝、显式放行）+ 内部接口令牌。
  * <p>
- * 两个过滤器都只用 {@link FilterRegistrationBean} 注册（不声明为 @Component），避免 Spring Boot
+ * 三个过滤器都只用 {@link FilterRegistrationBean} 注册（不声明为 @Component），避免 Spring Boot
  * 因"Bean 即过滤器"而重复注册一次。顺序：JwtAuthFilter（order=10）先解析身份，
- * LoginRequiredFilter（order=20）再判定是否必须登录。
+ * LoginRequiredFilter（order=20）再判定是否必须登录，
+ * InternalAuthFilter（order=30）只拦 {@code /internal/**}（用户 JWT 对它无效，见 docs/api.md §11）。
  */
 @Configuration
 public class WebSecurityFilterConfig {
@@ -24,6 +27,9 @@ public class WebSecurityFilterConfig {
 
     /** 登录要求过滤器顺序：后于认证过滤器 */
     private static final int ORDER_LOGIN_REQUIRED = 20;
+
+    /** 内部接口令牌过滤器顺序：放在最后（只拦 /internal/**，与用户登录互不影响） */
+    private static final int ORDER_INTERNAL_TOKEN = 30;
 
     /**
      * 注册 JWT 认证过滤器。
@@ -58,6 +64,24 @@ public class WebSecurityFilterConfig {
         registration.addUrlPatterns("/api/*");
         registration.setOrder(ORDER_LOGIN_REQUIRED);
         registration.setName("loginRequiredFilter");
+        return registration;
+    }
+
+    /**
+     * 注册内部接口令牌过滤器：{@code /internal/**} 必须带正确的 {@code X-Internal-Token}，否则 401。
+     *
+     * @param properties   业务配置（含 internal-token）
+     * @param objectMapper 统一返回体序列化
+     * @return 过滤器注册（只作用范围 {@code /internal/*}）
+     */
+    @Bean
+    public FilterRegistrationBean<InternalAuthFilter> internalAuthFilterRegistration(
+            WorkbenchStorageProperties properties, ObjectMapper objectMapper) {
+        FilterRegistrationBean<InternalAuthFilter> registration =
+                new FilterRegistrationBean<>(new InternalAuthFilter(properties, objectMapper));
+        registration.addUrlPatterns(InternalAuthFilter.INTERNAL_PREFIX + "*");
+        registration.setOrder(ORDER_INTERNAL_TOKEN);
+        registration.setName("internalAuthFilter");
         return registration;
     }
 }
