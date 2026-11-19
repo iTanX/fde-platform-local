@@ -26,6 +26,7 @@
 # 安全：DSH_HOME / DSH_AGENTS_HOME 永远指向 <仓库>/runtime 内，绝不读写 ~/.dsh、~/.agents。
 # Windows 请用 Git Bash / WSL，或改用 scripts/start-all.ps1。
 # =============================================================================
+set +x
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
@@ -36,10 +37,16 @@ warn() { echo "[警告] $*" >&2; }
 err() { echo "[错误] $*" >&2; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/start-env.sh
+source "$REPO_ROOT/scripts/start-env.sh"
+load_local_env || { err "无法加载 scripts/local.env。"; exit 1; }
+set_storage_root
+
 RUNTIME_DIR="${FDE_RUNTIME_DIR:-$REPO_ROOT/runtime}"
+# 在切换子进程工作目录前将相对路径锚定到调用目录。
+RUNTIME_DIR="$(mkdir -p "$RUNTIME_DIR" && cd "$RUNTIME_DIR" && pwd -P)" || exit 1
 DSH_OUT="$RUNTIME_DIR/dsh"
 DSH_BIN="$DSH_OUT/apps/cli/lib/bin.js"
-PLUGIN_DIR="$REPO_ROOT/fde-workbench-bundle"
 PROFILE_DIR="$RUNTIME_DIR/dsh-home/profiles/web"
 
 WAIT_ONLY=0
@@ -53,6 +60,14 @@ done
 DSH_PORT="${FDE_DSH_PORT:-3080}"
 DSH_HOST="${FDE_DSH_HOST:-127.0.0.1}"
 BACKEND_PORT="${FDE_SERVER_PORT:-8081}"
+DSH_ORIGIN_HOST="$DSH_HOST"
+if [[ "$DSH_HOST" == *:* && "$DSH_HOST" != \[*\] ]]; then
+  DSH_ORIGIN_HOST="[$DSH_HOST]"
+fi
+DSH_ORIGIN="http://$DSH_ORIGIN_HOST"
+if [[ "$DSH_PORT" != 80 ]]; then
+  DSH_ORIGIN="$DSH_ORIGIN:$DSH_PORT"
+fi
 LOG_DIR="$RUNTIME_DIR/logs"
 BACKEND_LOG="$LOG_DIR/backend.log"
 DSH_LOG="$LOG_DIR/dsh-web.log"
@@ -106,11 +121,37 @@ if port_in_use "$DSH_PORT"; then
   err "或先停掉占用进程（查看：lsof -nP -iTCP:$DSH_PORT -sTCP:LISTEN）。"
   exit 1
 fi
-if [[ "${FDE_NO_BACKEND:-0}" != "1" ]] && port_in_use "$BACKEND_PORT"; then
-  err "端口 $BACKEND_PORT 已被占用（Java 后端需要它）。"
-  err "请换端口重试，例如：FDE_SERVER_PORT=8082 ./scripts/start-all.sh"
-  exit 1
+if [[ "${FDE_NO_BACKEND:-0}" != "1" ]]; then
+  if port_in_use "$BACKEND_PORT"; then
+    err "端口 $BACKEND_PORT 已被占用（Java 后端需要它）。"
+    err "请换端口重试，例如：FDE_SERVER_PORT=8082 ./scripts/start-all.sh"
+    exit 1
+  fi
+  if [[ -z "${FDE_DB_PASSWORD:-}" ]]; then
+    err "未设置 FDE_DB_PASSWORD。请通过环境变量或 scripts/local.env 配置。"
+    exit 1
+  fi
+
+  # 只生成一次，供本次启动的 Host 和 Java 共享。显式配置可跨重启复用。
+  if [[ -z "${FDE_INTERNAL_TOKEN:-}" ]]; then
+    FDE_INTERNAL_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')" || exit 1
+  fi
+  if [[ "${FDE_INTERNAL_TOKEN}" == *[[:space:][:cntrl:]]* ]]; then
+    err "FDE_INTERNAL_TOKEN 不能包含空白或控制字符。"
+    exit 1
+  fi
+  FDE_JAVA_BASE_URL="http://127.0.0.1:$BACKEND_PORT"
+
+  # 浏览器将 localhost 和 127.0.0.1 视作不同来源。保持显式 CORS 白名单的优先级。
+  if [[ -z "${FDE_WORKBENCH_ALLOWED_ORIGINS:-}" ]]; then
+    FDE_WORKBENCH_ALLOWED_ORIGINS="$DSH_ORIGIN"
+    case "$DSH_HOST" in
+      127.0.0.1) FDE_WORKBENCH_ALLOWED_ORIGINS+=",${DSH_ORIGIN/127.0.0.1/localhost}" ;;
+      localhost) FDE_WORKBENCH_ALLOWED_ORIGINS+=",${DSH_ORIGIN/localhost/127.0.0.1}" ;;
+    esac
+  fi
 fi
+export FDE_INTERNAL_TOKEN FDE_JAVA_BASE_URL FDE_WORKBENCH_ALLOWED_ORIGINS
 
 # ---------------------------------------------------------------------------
 # 1. 进程管理与退出
@@ -155,7 +196,10 @@ start_dsh() {
   info "启动 dsh web：$DSH_HOST:${DSH_PORT}（profile = web，DSH_HOME = ${DSH_HOME}）"
   : > "$DSH_LOG"
   (
-    cd "$DSH_OUT" || exit 1
+    cd "$REPO_ROOT" || exit 1
+    # Host 插件只需要工作台内网令牌，无需继承 Java 数据库凭据或 JWT 密钥。
+    unset FDE_DB_PASSWORD FDE_DB_URL FDE_DB_USERNAME FDE_JWT_SECRET \
+      SPRING_DATASOURCE_PASSWORD SPRING_DATASOURCE_URL SPRING_DATASOURCE_USERNAME
     # --no-open：由启动脚本统一决定是否打开浏览器，避免重复开窗
     exec node "$DSH_BIN" web --host "$DSH_HOST" --port "$DSH_PORT" --no-open
   ) > "$DSH_LOG" 2>&1 &
@@ -216,23 +260,11 @@ start_backend() {
     info "已按 FDE_NO_BACKEND=1 跳过 Java 后端"
     return 0
   fi
-  # 密码可来自环境变量或 scripts/local.env（与 start-backend.sh 一致）
-  if [[ -z "${FDE_DB_PASSWORD:-}" ]] && [[ -f "$REPO_ROOT/scripts/local.env" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/scripts/local.env"
-  fi
-  if [[ -z "${FDE_DB_PASSWORD:-}" ]]; then
-    err "未设置 FDE_DB_PASSWORD，Java 后端无法连接数据库。"
-    err "  export FDE_DB_PASSWORD='<密码>' ./scripts/start-all.sh"
-    err "  或 cp scripts/local.env.example scripts/local.env 后填写（该文件已 gitignore）。"
-    err "只想调试插件界面时可加 FDE_NO_BACKEND=1。"
-    return 1
-  fi
-  export FDE_SERVER_PORT="$BACKEND_PORT"
-  info "启动 Java 后端（端口 ${FDE_SERVER_PORT}，日志 ${BACKEND_LOG}）"
+  info "启动 Java 后端（端口 ${BACKEND_PORT}，日志 ${BACKEND_LOG}）"
   (
-    cd "$REPO_ROOT" || exit 1
-    exec ./scripts/start-backend.sh
+    export FDE_SERVER_PORT="$BACKEND_PORT"
+    export FDE_DB_PASSWORD FDE_DB_URL FDE_DB_USERNAME FDE_JWT_SECRET
+    exec "$REPO_ROOT/scripts/start-backend.sh"
   ) > "$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
 }
@@ -242,7 +274,7 @@ start_backend() {
 # ---------------------------------------------------------------------------
 echo "================================================================"
 echo " Web 工作台 · 自带 dsh web + Java 后端"
-echo "   dsh web   http://$DSH_HOST:$DSH_PORT      DSH_HOME=$DSH_HOME"
+echo "   dsh web   $DSH_ORIGIN      DSH_HOME=$DSH_HOME"
 BACKEND_TITLE="http://127.0.0.1:$BACKEND_PORT"
 [[ "${FDE_NO_BACKEND:-0}" == "1" ]] && BACKEND_TITLE="（已按 FDE_NO_BACKEND=1 跳过）"
 echo "   Java 后端 $BACKEND_TITLE"
@@ -258,7 +290,7 @@ fi
 AUTH_URL="$DSH_URL"
 
 # 无 token 访问应当得到 401（说明服务已就绪且鉴权生效），用于确认端口真的在监听
-if ! wait_for_http "http://$DSH_HOST:$DSH_PORT/" 40; then
+if ! wait_for_http "$DSH_ORIGIN/" 40; then
   err "dsh web 已打印地址但端口无响应，日志尾部（${DSH_LOG}）："
   tail -n 40 "$DSH_LOG" >&2 || true
   shutdown 1
@@ -291,7 +323,7 @@ echo " 浏览器首次访问请用下面的授权地址（带一次性 token，�
 echo ""
 echo "   $AUTH_URL"
 echo ""
-echo " 打开后会种下 cookie 并跳到：http://$DSH_HOST:$DSH_PORT/"
+echo " 打开后会种下 cookie 并跳到：$DSH_ORIGIN/"
 echo " 之后直接访问该地址即可（同一浏览器）。"
 echo "---------------------------------------------------------------"
 echo " 日志：$DSH_LOG"

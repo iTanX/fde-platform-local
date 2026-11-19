@@ -6,20 +6,37 @@
 #   ./scripts/build-plugin.sh
 #
 # 说明：
-#   1. 构建方式以 T0-3 任务实测结论为准；本脚本调用插件包内声明的构建命令。
-#   2. 若插件包尚未创建，脚本给出明确提示而不是失败退出。
+#   调用插件包自己的构建入口。setup 之后同步并重建已安装的插件副本。
 # =============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLUGIN_DIR="$REPO_ROOT/fde-workbench-bundle"
+PLUGIN_SOURCE="$REPO_ROOT/fde-workbench-bundle"
+RUNTIME_DIR="${FDE_RUNTIME_DIR:-$REPO_ROOT/runtime}"
+INSTALLED_PLUGIN="$RUNTIME_DIR/workbench-bundle"
 
-if [[ ! -d "$PLUGIN_DIR" ]]; then
-  echo "[错误] 未找到插件目录：$PLUGIN_DIR" >&2
-  echo "       T0-3（插件包骨架）可能尚未完成。" >&2
+if [[ ! -f "$PLUGIN_SOURCE/package.json" ]]; then
+  echo "[错误] 未找到插件目录：$PLUGIN_SOURCE" >&2
   exit 1
 fi
 
+PLUGIN_DIR="$PLUGIN_SOURCE"
+if [[ -e "$INSTALLED_PLUGIN" || -L "$INSTALLED_PLUGIN" ]]; then
+  if [[ ! -d "$INSTALLED_PLUGIN" || -L "$INSTALLED_PLUGIN" ]]; then
+    echo "[错误] 插件安装目录必须是实际目录：$INSTALLED_PLUGIN" >&2
+    exit 1
+  fi
+  PLUGIN_DIR="$(cd "$INSTALLED_PLUGIN" && pwd -P)"
+  # 构建成功前保留现有 lib 子目录，并隔离开发时的 node_modules。
+  rsync -a --delete --exclude=/.git --exclude=/node_modules --exclude=/lib \
+    "$PLUGIN_SOURCE"/ "$PLUGIN_DIR"/
+fi
+
+DSH_SRC="$(cd "${DSH_SRC:-$RUNTIME_DIR/src}" && pwd -P)" || {
+  echo "[错误] 未找到 DSH 源码，请先运行 ./scripts/setup-runtime.sh 或指定 DSH_SRC。" >&2
+  exit 1
+}
+export DSH_SRC
 cd "$PLUGIN_DIR"
 
 # 优先使用插件包自带的构建入口，其次回落到 npm scripts

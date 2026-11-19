@@ -19,19 +19,20 @@
 #   FDE_RUNTIME_DIR 运行时目录，默认 <仓库>/runtime
 #
 # 幂等：任意一步已经完成时会跳过；可反复执行。
-# 安全：本脚本只写 <仓库>/runtime 与插件包的 lib/，绝不写 ~/.dsh、~/.agents。
+# 插件源码复制到本项目运行目录后构建和安装，profile 也保存在该目录。
 # Windows 请用 Git Bash / WSL，或改用 scripts/setup-runtime.ps1。
 # =============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="${FDE_RUNTIME_DIR:-$REPO_ROOT/runtime}"
+RUNTIME_DIR="$(mkdir -p "$RUNTIME_DIR" && cd "$RUNTIME_DIR" && pwd -P)"
 SRC_DIR="$RUNTIME_DIR/src"
 DSH_OUT="$RUNTIME_DIR/dsh"
 DSH_HOME="$RUNTIME_DIR/dsh-home"
 AGENTS_HOME="$RUNTIME_DIR/agents-home"
 PROFILE_DIR="$DSH_HOME/profiles/web"
-PLUGIN_DIR="$REPO_ROOT/fde-workbench-bundle"
+PLUGIN_DIR="$RUNTIME_DIR/workbench-bundle"
 PLUGIN_NAME="@local/dsh-workbench-bundle"
 DSH_TAG="${DSH_TAG:-dsh-v0.2.2-rc.5}"
 DSH_REPO="${DSH_REPO:-https://github.com/deepseek-ai/deepseek-harness}"
@@ -85,46 +86,8 @@ if [[ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ]] \
 fi
 info "Node v${NODE_VERSION} 符合要求（≥ ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}.0）"
 
-# pnpm：仓库固定 packageManager=pnpm@11.28.5，优先用 corepack 按此版本调度
-# 注意：`dsh plugin` 内部会**按命令名 pnpm 调用**（不是 <node> <pnpm.cjs>），所以除了本脚本自己用，
-# 还必须保证子进程的 PATH 里有 pnpm。没有 shim 时（只装了 Node、没 corepack enable）就补一个临时 shim。
-PNPM=()
-if command -v pnpm >/dev/null 2>&1; then
-  PNPM=(pnpm)
-elif command -v corepack >/dev/null 2>&1; then
-  PNPM=(corepack pnpm)
-else
-  die "未找到 corepack 或 pnpm。请执行 'corepack enable'（Node 自带 corepack），或 'npm i -g pnpm@11' 后重试。"
-fi
-info "包管理器：${PNPM[*]}"
-
-if ! command -v pnpm >/dev/null 2>&1; then
-  # corepack 已下载的 pnpm 入口（首次执行 corepack pnpm 后才会出现在缓存里）
-  pnpm_entry() {
-    node -e '
-      const fs = require("node:fs"), os = require("node:os"), path = require("node:path")
-      const want = String(require(process.argv[1]).packageManager ?? "").replace(/^pnpm@/, "")
-      const home = process.env.COREPACK_HOME ?? path.join(os.homedir(), ".cache", "node", "corepack")
-      const dir = path.join(home, "v1", "pnpm")
-      if (!fs.existsSync(dir)) process.exit(1)
-      const pick = fs.existsSync(path.join(dir, want)) ? want : fs.readdirSync(dir).sort().pop()
-      const entry = path.join(dir, pick, "bin", "pnpm.cjs")
-      if (!fs.existsSync(entry)) process.exit(1)
-      console.log(entry)
-    ' "$SRC_DIR/package.json" 2>/dev/null
-  }
-  # 先让 corepack 按 packageManager 落一次缓存（幂等、离线也能命中已有缓存）
-  (cd "$RUNTIME_DIR" && "${PNPM[@]}" --version >/dev/null 2>&1) || true
-  PNPM_ENTRY="$(pnpm_entry)"
-  if [[ -z "$PNPM_ENTRY" ]]; then
-    die "找不到 pnpm 可执行入口（corepack 缓存里没有 pnpm）。请先执行 'corepack enable' 或 'npm i -g pnpm@11' 后重试。"
-  fi
-  SHIM_DIR="$RUNTIME_DIR/.bin"
-  mkdir -p "$SHIM_DIR"
-  printf '#!/bin/sh\n# 由 setup-runtime.sh 生成：把 pnpm 暴露成命令名，供 dsh plugin 内部调用\nexec node "%s" "$@"\n' "$PNPM_ENTRY" > "$SHIM_DIR/pnpm"
-  chmod +x "$SHIM_DIR/pnpm"
-  export PATH="$SHIM_DIR:$PATH"
-  info "已生成 pnpm 命令入口：$SHIM_DIR/pnpm（供 dsh plugin 内部调用）"
+if ! command -v pnpm >/dev/null 2>&1 && ! command -v corepack >/dev/null 2>&1; then
+  die "未找到 corepack 或 pnpm。请安装其中之一后重试。"
 fi
 
 FREE_GB="$(node -e '
@@ -212,7 +175,7 @@ else
 fi
 
 # 版本核对：源码版本必须与期望 tag 一致，否则插件可能不兼容
-SRC_VERSION="$(node -p "require('$SRC_DIR/apps/cli/package.json').version" 2>/dev/null || echo '未知')"
+SRC_VERSION="$(node -p 'require(process.argv[1]).version' "$SRC_DIR/apps/cli/package.json" 2>/dev/null || echo '未知')"
 info "源码版本：${SRC_VERSION}（tag ${DSH_TAG}）"
 SRC_SIZE="$(du -sh "$SRC_DIR" 2>/dev/null | cut -f1 || echo '?')"
 info "源码体积：$SRC_SIZE"
@@ -223,8 +186,19 @@ info "源码体积：$SRC_SIZE"
 step "3/7 安装 DSH 依赖（npm registry，首次约数分钟）"
 
 cd "$SRC_DIR"
+if ! command -v pnpm >/dev/null 2>&1; then
+  # DSH 安装插件时按命令名调用 pnpm。源码就绪后读取其锁定版本，无须全局 shim 或预热缓存。
+  PNPM_SPEC="$(node -p 'require(process.argv[1]).packageManager' "$SRC_DIR/package.json")"
+  [[ "$PNPM_SPEC" =~ ^pnpm@[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "DSH 源码未声明可识别的 pnpm 版本。"
+  SHIM_DIR="$RUNTIME_DIR/.bin"
+  mkdir -p "$SHIM_DIR"
+  printf '#!/bin/sh\nexec corepack %s "$@"\n' "$PNPM_SPEC" > "$SHIM_DIR/pnpm"
+  chmod +x "$SHIM_DIR/pnpm"
+  export PATH="$SHIM_DIR:$PATH"
+fi
+info "包管理器：$(command -v pnpm)"
 # 注意：不要在这里设置 NODE_ENV=production，构建需要 devDependencies（typescript/tsdown/vite）
-"${PNPM[@]}" install --frozen-lockfile \
+pnpm install --frozen-lockfile \
   || die "pnpm install 失败。常见原因：网络/代理（HTTPS_PROXY）、npm registry 无权限、或 node-pty 等原生依赖编译失败（需要 Xcode Command Line Tools / build-essential）。修复后重试。"
 info "依赖安装完成（node_modules 体积：$(du -sh node_modules | cut -f1)）"
 
@@ -235,7 +209,7 @@ step "4/7 构建 DSH 宿主包（Host libraries，最耗时的一步）"
 
 cd "$SRC_DIR"
 # NODE_OPTIONS 里的 --no-experimental-strip-types 会让 tsdown 无法加载 TS 配置，这里显式清掉
-NODE_OPTIONS="" "${PNPM[@]}" exec tsx scripts/compile-referenced-projects.ts host-libraries \
+NODE_OPTIONS="" pnpm exec tsx scripts/compile-referenced-projects.ts host-libraries \
   || die "宿主包构建失败（脚本：scripts/compile-referenced-projects.ts host-libraries）。若报『TypeScript type stripping is unavailable』，请检查 NODE_OPTIONS 是否包含 --no-experimental-strip-types；若是内存不足，请提高 Node 堆上限后重试。"
 [[ -f apps/cli/lib/bin.js ]] || die "构建结束但缺少 apps/cli/lib/bin.js，构建未真正完成。请查看上面的日志。"
 info "宿主包构建完成（apps/cli/lib/bin.js 已生成）"
@@ -252,13 +226,13 @@ cd "$SRC_DIR"
 if [[ -d packages/client/ui-sidebar/lib/types ]]; then
   info "客户端包已编译（lib/types 齐全），跳过 tsc，直接重新打包"
 else
-  NODE_OPTIONS="" "${PNPM[@]}" exec tsc -b tsconfig.client.json \
+  NODE_OPTIONS="" pnpm exec tsc -b tsconfig.client.json \
     || die "客户端包编译失败（tsc -b tsconfig.client.json）。请查看上面的类型错误。"
 fi
 # tsdown 会并发构建全部工作区包；某个包报 UNRESOLVED_ENTRY 多半是上一次的 lib/ 被清空所致，
 # 因此失败时自动重试一次（第二次此时 lib/types 已稳定，通常即可通过）。
 client_bundle() {
-  NODE_OPTIONS="" "${PNPM[@]}" exec tsdown --config-loader native --env.DSH_BUILD_FACE client
+  NODE_OPTIONS="" pnpm exec tsdown --config-loader native --env.DSH_BUILD_FACE client
 }
 if ! client_bundle; then
   warn "客户端包打包失败，自动重试一次（上一次的报错多为 lib/ 被 tsc 清空导致的时序问题）…"
@@ -269,7 +243,7 @@ fi
   || die "客户端包打包结束但缺少 packages/client/ui-sidebar/lib/client.js，构建未真正完成。"
 # 打包浏览器页面：web-app 通过 @deepseek-ai/dsh-web-frontend/package.json 的 dist/index.html 找页面，
 # 没有这个文件时服务能起但页面 404
-NODE_OPTIONS="" "${PNPM[@]}" --filter @deepseek-ai/dsh-web-frontend run build \
+NODE_OPTIONS="" pnpm --filter @deepseek-ai/dsh-web-frontend run build \
   || die "Web 前端构建失败（vite build，包 @deepseek-ai/dsh-web-frontend）。请查看上面的 vite 日志。"
 [[ -f apps/web/dist/index.html ]] || die "Web 前端构建结束但缺少 apps/web/dist/index.html，构建未真正完成。"
 info "前端 dist 已生成：apps/web/dist（$(du -sh apps/web/dist | cut -f1)）"
@@ -279,26 +253,14 @@ info "前端 dist 已生成：apps/web/dist（$(du -sh apps/web/dist | cut -f1)�
 # ---------------------------------------------------------------------------
 step "6/7 产出 runtime/dsh（可搬运的 dsh 运行目录）"
 
-# 拷贝 DSH 源码树（含构建产物）：
-#   - 用 --copy-dest=<pnpm store>：把第三方包文件「硬链接」进 runtime/dsh，秒级完成且几乎不占额外空间；
-#   - 保留 node_modules 内的相对软链（workspace 包之间是相对路径链接，整体搬运后依然有效）；
-#   - --delete 保证 runtime/dsh 与构建目录一致。
+# 保留 pnpm 生成的相对 workspace 软链，使运行目录自包含。
 if ! command -v rsync >/dev/null 2>&1; then
-  die "未找到 rsync（macOS 自带；Debian/Ubuntu 执行 apt install rsync）。它用于快速、省空间地产出 runtime/dsh。"
+  die "未找到 rsync（macOS 自带；Debian/Ubuntu 执行 apt install rsync）。"
 fi
-pnpm_store="$(cd "$SRC_DIR" && "${PNPM[@]}" store path 2>/dev/null | tail -n 1 || true)"
-RSYNC_OPTS=(-a --delete --exclude=.git --exclude=.agents/tmp)
-if [[ -n "$pnpm_store" ]] && [[ -d "$pnpm_store" ]]; then
-  info "pnpm 存储目录：${pnpm_store}（用于硬链接拷贝）"
-  # 目录形态的 --copy-dest 要写成 "<store>/."，表示「把 store 当作本机已有文件的来源」
-  RSYNC_OPTS+=(--copy-dest="$pnpm_store".)
-else
-  warn "无法确定 pnpm 全局存储目录，将逐文件拷贝（更慢、更占空间）。"
-fi
-
+[[ ! -L "$DSH_OUT" ]] || die "DSH 运行目录必须是实际目录：$DSH_OUT"
 mkdir -p "$DSH_OUT"
 info "同步源码与构建产物到 $DSH_OUT ..."
-rsync "${RSYNC_OPTS[@]}" "$SRC_DIR"/ "$DSH_OUT"/
+rsync -a --delete --exclude=.git --exclude=.agents/tmp "$SRC_DIR"/ "$DSH_OUT"/
 
 # 运行期必需产物自检（缺一个 dsh web 都起不来）
 for required in \
@@ -325,50 +287,61 @@ info "启动器自检通过：dsh $DSH_CLI_VERSION"
 # ---------------------------------------------------------------------------
 step "7/7 构建 fde-workbench-bundle 并安装进 profile"
 
-[[ -f "$PLUGIN_DIR/package.json" ]] || die "未找到插件包：$PLUGIN_DIR"
-(cd "$PLUGIN_DIR" && DSH_SRC="$SRC_DIR" bash scripts/build.sh) \
-  || die "插件构建失败（fde-workbench-bundle/scripts/build.sh）。请查看上面的 tsc/tsdown 日志。"
+# 在运行目录构建并安装副本，确保目标机只依赖本次构建的产物。
+[[ ! -L "$PLUGIN_DIR" ]] || die "插件安装目录必须是实际目录：$PLUGIN_DIR"
+mkdir -p "$PLUGIN_DIR"
+FDE_RUNTIME_DIR="$RUNTIME_DIR" DSH_SRC="$SRC_DIR" bash "$REPO_ROOT/scripts/build-plugin.sh" \
+  || die "插件构建失败。请查看上面的 tsc/tsdown 日志。"
 for artifact in lib/index.js lib/client.js; do
   [[ -f "$PLUGIN_DIR/$artifact" ]] || die "插件构建结束但缺少 ${artifact}。"
 done
 info "插件产物：lib/index.js（Host 入口）、lib/client.js（$(du -h "$PLUGIN_DIR/lib/client.js" | cut -f1) 浏览器 bundle）"
 
 # profile 由 dsh 首次使用时按官方模板初始化（web → dsh-base + dsh-web-app）；
-# 再用官方 `dsh plugin ... add <目录>` 把本插件装进去并按 dsh.bundle 自动选中。
-# 不直接改 <插件目录>/package.json —— 那是源码，安装只会改 profile 自己的清单。
+# 再用官方 `dsh plugin ... add <目录>` 把运行目录中的副本装进去并按 dsh.bundle 自动选中。
 cd "$DSH_OUT"
-export DSH_HOME
-# dsh plugin 最终调用 pnpm：保证 PATH 里有 pnpm（corepack 直连时会用 npm 全局的 pnpm）
 node "$DSH_BIN" plugin --profile web add "$PLUGIN_DIR" \
   || die "插件安装失败（node runtime/dsh/apps/cli/lib/bin.js plugin --profile web add ${PLUGIN_DIR}）。常见原因：profile 目录残留 pnpm 锁、PATH 中没有 pnpm、网络不可用。可删除 ${PROFILE_DIR}/node_modules 与 pnpm-lock.yaml 后重试。"
 
-# ---- 安装结果自检：bundles、link 依赖、Client bundle 都能被 dsh 解析到 ----
-node -e '
-  const fs = require("node:fs"), path = require("node:path")
-  const [profileDir, pluginName, pluginDir] = process.argv.slice(1)
-  const fail = message => { console.error("[错误] " + message); process.exit(1) }
-  const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, "package.json"), "utf8"))
-  const bundles = manifest.dsh?.profile?.bundles ?? []
-  const deps = manifest.dependencies ?? {}
-  const need = ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", pluginName]
-  const missing = need.filter(name => !bundles.includes(name))
-  if (missing.length > 0) fail(`profile 的 dsh.profile.bundles 缺少：${missing.join(", ")}（当前：${bundles.join(", ")}）`)
-  if (!deps[pluginName]) fail(`profile package.json 的 dependencies 里没有 ${pluginName}`)
-  const installed = path.join(profileDir, "node_modules", ...pluginName.split("/"))
-  if (!fs.existsSync(path.join(installed, "package.json"))) fail(`profile 的 node_modules 里没有 ${pluginName}（应指向 ${pluginDir}）`)
-  const pkg = JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8"))
-  if (pkg.dsh?.client?.platform !== "web") fail(`${pluginName} 的 dsh.client.platform 不是 "web"，浏览器端不会加载它`)
-  const clientPath = path.join(installed, pkg.exports?.["./client"] ?? "")
-  if (!fs.existsSync(clientPath)) fail(`插件声明的 Client bundle 不存在：${clientPath}`)
-  for (const name of ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]) {
-    const dir = path.join(profileDir, "node_modules", ...name.split("/"))
-    if (!fs.existsSync(dir)) console.log(`[警告] profile 的 node_modules 里没有 ${name}（运行期会从 dsh 安装目录解析，属正常）`)
-  }
-  console.log(`[信息] profile 校验通过：bundles = ${bundles.join(" + ")}`)
-  console.log(`[信息] 插件已安装：${pluginName} → ${fs.realpathSync(installed)}`)
-  console.log(`[信息] Client bundle：${pkg.exports["./client"]}（platform=${pkg.dsh.client.platform}，${fs.statSync(clientPath).size} B）`)
-' "$PROFILE_DIR" "$PLUGIN_NAME" "$PLUGIN_DIR" \
+# 校验实际安装的 Client 文件，以及通过 DSH 官方 profile 解析器加载的 Host 入口。
+node --input-type=module - "$PROFILE_DIR" "$PLUGIN_NAME" "$PLUGIN_DIR" "$DSH_OUT/apps/cli/package.json" <<'NODE' \
   || die "profile 安装结果校验失败（见上方原因）。修复后重新执行本脚本。"
+import assert from 'node:assert/strict'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const [profileDir, pluginName, pluginDir, installAnchor] = process.argv.slice(2)
+const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+const bundles = manifest.dsh?.profile?.bundles ?? []
+for (const name of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', pluginName]) {
+  assert(bundles.includes(name), `profile 缺少 bundle：${name}`)
+}
+const installed = join(profileDir, 'node_modules', pluginName)
+assert.equal(realpathSync(installed), realpathSync(pluginDir), 'profile 必须链接到本次构建的插件')
+const pkg = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8'))
+assert.equal(pkg.dsh?.client?.platform, 'web')
+const clientPath = join(installed, pkg.exports['./client'])
+assert(statSync(clientPath).isFile(), '缺少插件 Client 产物')
+
+const require = createRequire(installAnchor)
+const { Context } = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href)
+const { createRuntimeResolution, loadProfileDirectory, PluginPackages } =
+  await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href)
+const profile = loadProfileDirectory('dsh', profileDir, installAnchor)
+const resolution = await createRuntimeResolution({ installAnchor, profile, home: process.env.DSH_HOME })
+const ctx = new Context()
+try {
+  await ctx.plugin(PluginPackages, { resolution })
+  const host = await import(pathToFileURL(join(installed, pkg.exports['.'])).href)
+  assert.equal(typeof host.apply, 'function')
+  assert.equal(typeof host.name, 'string')
+} finally {
+  await ctx.fiber.dispose()
+}
+console.log(`[信息] profile 校验通过：${bundles.join(' + ')}，Host 与 Client 产物可用`)
+NODE
 
 # ---------------------------------------------------------------------------
 # 完成
