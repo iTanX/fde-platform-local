@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  用户表 wb_user 的 SQL。
+  约定：时间列 DATETIME(3) 无数据库默认值，插入时由应用传入 useGeneratedKeys 回填主键。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.UserMapper">
+
+    <!-- 用户全字段映射；password_hash 可为 NULL（空密码注册） -->
+    <resultMap id="UserMap" type="com.fde.workbench.dao.entity.User">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="passwordHash" column="password_hash"/>
+        <result property="displayName" column="display_name"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="UserColumns">
+        id, username, password_hash, display_name, created_at, updated_at
+    </sql>
+
+    <select id="selectByUsername" resultMap="UserMap">
+        SELECT <include refid="UserColumns"/>
+          FROM wb_user
+         WHERE username = #{username}
+    </select>
+
+    <select id="selectById" resultMap="UserMap">
+        SELECT <include refid="UserColumns"/>
+          FROM wb_user
+         WHERE id = #{id}
+    </select>
+
+    <!-- 插入用户：created_at / updated_at 由调用方 LocalDateTime.now() 传入，不依赖数据库默认值 -->
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.User"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_user (username, password_hash, display_name, created_at, updated_at)
+        VALUES (#{username}, #{passwordHash}, #{displayName}, #{createdAt}, #{updatedAt})
+    </insert>
+
+</mapper>

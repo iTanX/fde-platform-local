@@ -11,9 +11,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 健康检查接口：返回应用版本与数据库连通状态。
+ * 健康检查接口：返回应用版本、数据库连通状态与 JDBC 会话时区。
  * <p>
  * 数据库不通时 HTTP 仍为 200，返回结构化 JSON，{@code data.db=down} 且 {@code code=19901}（服务内部错误）。
+ * <p>
+ * {@code data.sessionTimeZone} 用于证明 JDBC 的 {@code sessionVariables=time_zone='+08:00'} 生效
+ * （T0-1 遗留的"会话时区未证明"项），正常值为 {@code +08:00}。
  */
 @RestController
 public class HealthController {
@@ -48,6 +51,7 @@ public class HealthController {
         data.put("db", dbUp ? DB_UP : DB_DOWN);
         data.put("version", version);
         if (dbUp) {
+            data.put("sessionTimeZone", healthService.sessionTimeZone());
             return ApiResult.ok(data);
         }
         return new ApiResult<>(ErrorCode.INTERNAL_ERROR.getCode(), "数据库连接不可用", data);

@@ -42,6 +42,8 @@
         <mybatis-spring-boot.version>3.0.5</mybatis-spring-boot.version>
         <!-- JWT 库（Spring Boot BOM 不管理，需显式指定） -->
         <jjwt.version>0.12.6</jjwt.version>
+        <!-- 口令哈希（BCrypt）：Spring Security BOM 管理版本，只取 crypto 单模块，不引入过滤器链 -->
+        <spring-security.version>6.2.8</spring-security.version>
     </properties>
 
     <dependencyManagement>
@@ -72,6 +74,12 @@
                 <groupId>org.mybatis.spring.boot</groupId>
                 <artifactId>mybatis-spring-boot-starter</artifactId>
                 <version>${mybatis-spring-boot.version}</version>
+            </dependency>
+            <!-- 仅 BCrypt 口令哈希所需，不引 spring-boot-starter-security -->
+            <dependency>
+                <groupId>org.springframework.security</groupId>
+                <artifactId>spring-security-crypto</artifactId>
+                <version>${spring-security.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.jsonwebtoken</groupId>

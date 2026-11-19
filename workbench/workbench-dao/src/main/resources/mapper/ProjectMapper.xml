@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  项目表 wb_project 的 SQL。
+
+  关键约定：
+  1. 列表只返回"我是成员（wb_project_member 存在记录）且 deleted=0"的项目 —— 对应 PRD REQ-B3；
+     owner 创建项目时同时写入成员记录，因此 owner 也命中同一条件，无需额外 UNION。
+  2. 成员数与需求数用相关子查询统计，避免逐行二次查询。
+  3. 更新/删除都带 revision 条件（乐观锁），冲突时返回 0 行，由 Service 决定报 10402 还是 10301。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.ProjectMapper">
+
+    <!-- 项目字段映射（基类 Project） -->
+    <resultMap id="BaseMap" type="com.fde.workbench.dao.entity.Project">
+        <id property="id" column="id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="ownerId" column="owner_id"/>
+        <result property="revision" column="revision"/>
+        <result property="deleted" column="deleted"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 项目 + 统计列映射：继承 BaseMap，只追加成员数与需求数（避免手写重复全字段映射） -->
+    <resultMap id="ProjectWithStatsMap" extends="BaseMap" type="com.fde.workbench.dao.entity.ProjectWithStats">
+        <result property="memberCount" column="member_count"/>
+        <result property="requirementCount" column="requirement_count"/>
+    </resultMap>
+
+    <!-- 统计列：成员数、需求数 -->
+    <sql id="StatsColumns">
+        (SELECT COUNT(*) FROM wb_project_member m WHERE m.project_id = p.id) AS member_count,
+        (SELECT COUNT(*) FROM wb_requirement r WHERE r.project_id = p.id) AS requirement_count
+    </sql>
+
+    <!-- 列表分页过滤条件：我所属 + 未删除 + 名称模糊匹配 -->
+    <sql id="MineFilter">
+        FROM wb_project p
+        JOIN wb_project_member pm ON pm.project_id = p.id
+       WHERE pm.user_id = #{userId}
+         AND p.deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND p.name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+    </sql>
+
+    <select id="countMine" resultType="long">
+        SELECT COUNT(*)
+        <include refid="MineFilter"/>
+    </select>
+
+    <select id="selectMine" resultMap="ProjectWithStatsMap">
+        SELECT p.id, p.name, p.description, p.owner_id, p.revision, p.deleted, p.created_at, p.updated_at,
+               <include refid="StatsColumns"/>
+        <include refid="MineFilter"/>
+         ORDER BY p.created_at DESC, p.id DESC
+         LIMIT #{offset}, #{size}
+    </select>
+
+    <select id="selectById" resultMap="ProjectWithStatsMap">
+        SELECT p.id, p.name, p.description, p.owner_id, p.revision, p.deleted, p.created_at, p.updated_at,
+               <include refid="StatsColumns"/>
+          FROM wb_project p
+         WHERE p.id = #{id}
+           AND p.deleted = 0
+    </select>
+
+    <!-- 插入项目：revision=1、deleted=0 用表默认值，时间列由应用写入 -->
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.Project"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_project (name, description, owner_id, revision, deleted, created_at, updated_at)
+        VALUES (#{name}, #{description}, #{ownerId}, 1, 0, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <!--
+      乐观锁更新：WHERE revision = 提交值。
+      返回 0 说明版本已被别人推进（或项目已删除），Service 据此返回 409 10402 / 404 10301，并 revision+1。
+    -->
+    <update id="updateWithRevision">
+        UPDATE wb_project
+           SET name = #{name},
+               description = #{description},
+               revision = revision + 1,
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND revision = #{revision}
+           AND deleted = 0
+    </update>
+
+    <!-- 逻辑删除：deleted=1 而非物理删除，避免破坏外键链上的其他业务数据 -->
+    <update id="markDeleted">
+        UPDATE wb_project
+           SET deleted = 1,
+               revision = revision + 1,
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND revision = #{revision}
+           AND deleted = 0
+    </update>
+
+</mapper>

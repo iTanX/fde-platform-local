@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  项目成员表 wb_project_member 的 SQL。
+  uk_member_project_user(project_id, user_id) 保证同一用户在同一项目只有一条记录，
+  role 取值 owner / member；一个项目有且只有一个 owner（由 Service 事务保证，T1-2 的转让逻辑同样遵守）。
+-->
+<mapper namespace="com.fde.workbench.dao.mapper.ProjectMemberMapper">
+
+    <resultMap id="ProjectMemberMap" type="com.fde.workbench.dao.entity.ProjectMember">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="role" column="role"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <select id="selectByProjectAndUser" resultMap="ProjectMemberMap">
+        SELECT id, project_id, user_id, role, created_at
+          FROM wb_project_member
+         WHERE project_id = #{projectId}
+           AND user_id = #{userId}
+    </select>
+
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.ProjectMember"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_project_member (project_id, user_id, role, created_at)
+        VALUES (#{projectId}, #{userId}, #{role}, #{createdAt})
+    </insert>
+
+</mapper>

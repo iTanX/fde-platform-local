@@ -9,6 +9,9 @@ import org.springframework.context.annotation.Configuration;
  * 安全相关 Bean 装配：从配置读取 JWT 密钥与有效期，构造 JwtUtil。
  * <p>
  * 密钥来源：application.yml 的 {@code security.jwt.secret}，默认取环境变量 {@code FDE_JWT_SECRET}。
+ * <p>
+ * 说明：本工程不引入 Spring Security 过滤器链，只使用其 {@code spring-security-crypto} 做 BCrypt；
+ * 认证由 {@link WebSecurityFilterConfig} 注册的 JwtAuthFilter + LoginRequiredFilter 完成。
  */
 @Configuration
 public class SecurityConfig {
