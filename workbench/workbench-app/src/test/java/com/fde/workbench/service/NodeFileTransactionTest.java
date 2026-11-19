@@ -50,14 +50,20 @@ class NodeFileTransactionTest {
         assertEquals("新内容", Files.readString(target));
     }
 
+    /**
+     * 同名文件按覆盖处理（产品决定）：发布到已存在的目标不再报错，而是用新内容替换。
+     * <p>
+     * 旧行为是「目标已存在 → 502」，那是加了 fileId 前缀时的产物；现在用户重传同名文件
+     * 页面期望的是覆盖，因此这里断言新行为，并确认覆盖后的内容确实是新的。
+     */
     @Test
-    void rollbackAfterPublishConflictDoesNotRemoveExistingVersion() throws Exception {
+    void publishOverwritesExistingTargetWithNewContent() throws Exception {
         Path staged = Files.writeString(directory.resolve(".staged-output"), "新内容");
         Path target = Files.writeString(directory.resolve("item.v2.md"), "旧内容");
 
-        assertThrows(BizException.class, () -> storagePaths.publishStagedFile(staged, target));
-        complete(TransactionSynchronization.STATUS_ROLLED_BACK);
-        assertEquals("旧内容", Files.readString(target));
+        storagePaths.publishStagedFile(staged, target);
+        complete(TransactionSynchronization.STATUS_COMMITTED);
+        assertEquals("新内容", Files.readString(target));
     }
 
     private static void complete(int status) {

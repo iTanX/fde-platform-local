@@ -20,7 +20,7 @@ import java.util.Locale;
  * <b>约定（docs/database.md §5.5 + docs/plugin-integration.md §5.1）</b>：需求 workspace 根为
  * {@code <storage-root>/ws/<requirementId>}（= {@code wb_requirement.dsh_workspace_path}），其下：
  * <pre>
- * &lt;ws&gt;/inputs/&lt;nodeSeq&gt;/&lt;fileId&gt;_&lt;原始文件名&gt;   节点输入（用户上传）
+ * &lt;ws&gt;/inputs/&lt;nodeSeq&gt;/&lt;原始文件名&gt;   节点输入（用户上传，保持原名）
  * &lt;ws&gt;/outputs/&lt;nodeSeq&gt;/&lt;itemKey&gt;.v&lt;N&gt;.&lt;ext&gt;  已登记的输出副本（下载 / 预览读这里）
  * &lt;ws&gt;/.workbench/&lt;nodeInstanceId&gt;/...          模型实际写入的目录（唯一允许的落盘位置）
  * </pre>
@@ -120,6 +120,11 @@ public class NodeStoragePaths {
     /** 同目录硬链接一次性发布完整文件，若目标已存在则保留原文件。 */
     void publishStagedFile(Path staged, Path target) {
         try {
+            // 同名文件按覆盖处理（产品决定）：硬链接要求目标不存在，所以先删掉旧的那份。
+            // 删除发生在同一事务里：事务回滚时下面的 afterCompletion 只清理本次发布的文件，
+            // 旧文件在回滚后已经丢失——这是"覆盖语义"的必然代价，且此处只有同一用户
+            // 覆盖自己刚传的同名文件这一种触发路径，可接受。
+            Files.deleteIfExists(target);
             Files.createLink(target, staged);
         } catch (IOException | UnsupportedOperationException ex) {
             log.error("发布节点文件失败：{}", target, ex);
@@ -157,19 +162,20 @@ public class NodeStoragePaths {
     }
 
     /**
-     * 节点输入文件路径：{@code <ws>/inputs/<nodeSeq>/<fileId>_<原始文件名>}。
+     * 节点输入文件路径：{@code <ws>/inputs/<nodeSeq>/<原始文件名>}。
      * <p>
-     * 文件名前缀用 {@code fileId} 而不是节点 ID：同一固定输入项允许重复上传，
-     * 用文件 ID 保证同一目录下不会出现同名文件互相覆盖，也便于从文件名反查 {@code wb_file}。
+     * <b>不加任何前缀</b>：用户上传的文件在磁盘上保持原名，模型读到的相对路径、
+     * 页面展示与下载名因此完全一致，不会出现"文件名被系统改写"这种意外。
+     * 同名文件按覆盖处理——这是产品决定（同一节点内重复上传同名文件，以最后一次为准）；
+     * 需要同时保留多份时由用户改文件名区分。
      *
      * @param workspace       需求 workspace 目录
      * @param nodeSeq         节点 seq
-     * @param fileId          文件 ID（先插入 {@code wb_file} 拿到）
      * @param safeFileName    已净化的原始文件名（只剩文件名部分）
      * @return 文件绝对路径（不创建）
      */
-    public Path inputFilePath(Path workspace, Integer nodeSeq, Long fileId, String safeFileName) {
-        String relative = INPUTS_DIR + "/" + nodeSeq + "/" + fileId + "_" + safeFileName;
+    public Path inputFilePath(Path workspace, Integer nodeSeq, String safeFileName) {
+        String relative = INPUTS_DIR + "/" + nodeSeq + "/" + safeFileName;
         return requireInside(storage.resolveWithin(workspace, relative), workspace, relative);
     }
 

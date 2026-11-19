@@ -196,6 +196,8 @@ export interface WriteRequest {
   workspacePath: string
   /** 输出项稳定键。 */
   itemKey: string
+  /** 期望的文件名（可含扩展名）；不给时用输出项名称 + fileKind 默认扩展名。 */
+  fileName?: string
   /** 源文件名（给定时用它取扩展名；不给则按 fileKind 取默认值）。 */
   sourceName?: string
   /** 单文件大小上限（字节）。 */
@@ -230,9 +232,12 @@ export function prepareOutputWrite(
     )
   }
   const outputDir = nodeOutputDir(workspacePath, context.nodeInstanceId)
-  // 写法固定为 `<输出目录>/<itemKey>.<ext>`：itemKey 由后端保证是 `[a-z0-9-]`，不会带路径分隔符
-  const extension = extensionFor(item, request.sourceName)
-  const absolutePath = resolve(outputDir, `${itemKey}${extension === '' ? '' : `.${extension}`}`)
+  // 文件名以"人看得懂"为准：优先用调用方给的文件名，其次用输出项名称。
+  // 不再固定成 `<itemKey>.<ext>`——itemKey 是内部稳定键（如 output-2），
+  // 用它当文件名会出现"用户下载到 output-2.md"这种看不懂的交付物。
+  const extension = extensionFor(item, request.sourceName, request.fileName)
+  const stem = fileStem(item)
+  const absolutePath = resolve(outputDir, `${stem}${extension === '' ? '' : `.${extension}`}`)
   // 只允许写 `.workbench/<nid>/` 下——即使前面的拼接被篡改也不会越界
   if (!isInside(outputDir, absolutePath)) {
     throw new Error(`拒绝写入 ${absolutePath}：模型输出只允许写在 ${outputDir} 之内。`)
@@ -246,18 +251,46 @@ export function prepareOutputWrite(
 }
 
 /**
+ * 决定输出文件的"主名"（不含扩展名）：**只用输出项名称**。
+ * <p>
+ * 为什么不采用模型自己给的文件名（`fileName` 参数里的主名部分）：
+ * 交付物是给业务用户下载归档的，文件名必须是输出项名称（"服务概述"、"调用次数报表"），
+ * 用户才认得出这是什么；而模型倾向于按内容格式造名（`json.json`、`markdown.md`、
+ * `output-1.md`），这样下载下来根本看不出对应哪一项交付。
+ * 因此主名在这里固定为输出项名称，模型传入的 `fileName` 只用于决定扩展名。
+ * <p>
+ * 名称里可能带路径分隔符或非法字符，这里一并清掉，避免越界或多层路径；
+ * 名称被清空时退回 itemKey（保证总能写出文件）。
+ *
+ * @param item - 输出项
+ * @returns 合法的主名
+ */
+function fileStem(item: OutputItemRef): string {
+  // 控制字符与路径分隔符不允许出现在文件名里；首尾空白也去掉
+  const cleaned = item.name
+    .split(/[\\/]/).pop()
+    ?? item.name
+  const safe = cleaned.replace(/[\u0000-\u001f/\\:*?"<>|]/g, '_').trim()
+  return safe.length > 0 ? safe : item.itemKey
+}
+
+/**
  * 决定输出文件的扩展名：优先用 sourcePath 的扩展名，其次按 fileKind 取默认值。
  * @param item - 输出项（带 fileKind）
  * @param sourcePath - 源文件路径（可空）
  * @returns 扩展名（不含点；空串表示没有扩展名）
  * @throws Error 扩展名不符合 fileKind
  */
-function extensionFor(item: OutputItemRef, sourcePath: string | undefined): string {
-  // 复制文件时跟随源扩展名；直接给 content 时按 fileKind 取默认扩展名。
-  // 这条路径下 item.fileKind 一定是支持的类型，所以默认值总能通过下面的白名单校验；
-  // 反过来若有人把 fileKind 传成未知值，白名单会拦住而不是写出无扩展名文件。
-  const fromSource = sourcePath === undefined ? '' : (sourcePath.split(/[\\/]/).pop()?.split('.').slice(1).pop() ?? '').toLowerCase()
-  const extension = fromSource.length > 0 ? fromSource : defaultExtension(item.fileKind)
+function extensionFor(item: OutputItemRef, sourcePath: string | undefined, fileName?: string): string {
+  // 优先级：显式文件名里的扩展名 > 源文件扩展名 > fileKind 默认扩展名。
+  // 显式文件名排第一是因为调用方最清楚这一项该是什么格式（.json / .properties / .xlsx）。
+  const extOf = (path: string | undefined): string =>
+    path === undefined ? '' : (path.split(/[\\/]/).pop()?.split('.').slice(1).pop() ?? '').toLowerCase()
+  const explicit = extOf(fileName)
+  const fromSource = extOf(sourcePath)
+  const extension = explicit.length > 0
+    ? explicit
+    : fromSource.length > 0 ? fromSource : defaultExtension(item.fileKind)
   const probe = `x.${extension}`
   if (!extensionAllowed(item.fileKind, probe)) {
     throw new Error(

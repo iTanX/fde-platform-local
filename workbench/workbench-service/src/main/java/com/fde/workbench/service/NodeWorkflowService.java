@@ -400,9 +400,15 @@ public class NodeWorkflowService {
                 record.setSha256(written.sha256());
                 record.setUploadedBy(userId);
                 record.setCreatedAt(now);
+                // 同名覆盖：磁盘按原名写出，旧的 wb_file / wb_requirement_node_input 必须一并清掉，
+                // 否则旧记录指向的正是即将被覆盖的那份内容，sha256 与大小都会对不上。
+                for (NodeInputFile replaced : nodeInputMapper.selectByNodeAndName(node.getId(), itemId, safeName)) {
+                    nodeInputMapper.deleteById(replaced.getId(), node.getId(), replaced.getFileId());
+                    fileMapper.deleteById(replaced.getFileId());
+                }
                 fileMapper.insert(record);
 
-                Path target = nodeStoragePaths.inputFilePath(workspace, node.getSeq(), record.getId(), safeName);
+                Path target = nodeStoragePaths.inputFilePath(workspace, node.getSeq(), safeName);
                 nodeStoragePaths.publishStagedFile(staged, target);
                 if (fileMapper.updateStoredFile(record.getId(), storage.relativize(target),
                         written.bytes(), written.sha256()) != 1) {

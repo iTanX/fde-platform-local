@@ -208,6 +208,17 @@ info "依赖安装完成（node_modules 体积：$(du -sh node_modules | cut -f1
 step "4/7 构建 DSH 宿主包（Host libraries，最耗时的一步）"
 
 cd "$SRC_DIR"
+# 原生插件（flock 文件锁）必须单独编译：官方 build:artifacts 的 gates 里有一道 native，
+# 而这里直接跑 compile-referenced-projects 绕过了它，结果 packages/darwin-*/ 只有元数据、
+# 没有 bin/system.node。服务能起、页面能开，但一旦执行到会话的文件锁就报
+# 「Cannot find module '.../darwin-arm64/bin/system.node'」。
+# 失败不致命（没有原生锁时 DSH 会退化），但要明确告知，避免"能起但会话随时崩"。
+if NODE_OPTIONS="" pnpm run build:native-system; then
+  info "原生插件已编译（native/system）"
+else
+  warn "原生插件编译失败（native/system）：会话的文件锁功能将不可用（报 Cannot find module ... system.node）。"
+  warn "通常是缺少编译工具链：macOS 需要 Xcode Command Line Tools，Linux 需要 build-essential + python3。"
+fi
 # NODE_OPTIONS 里的 --no-experimental-strip-types 会让 tsdown 无法加载 TS 配置，这里显式清掉
 NODE_OPTIONS="" pnpm exec tsx scripts/compile-referenced-projects.ts host-libraries \
   || die "宿主包构建失败（脚本：scripts/compile-referenced-projects.ts host-libraries）。若报『TypeScript type stripping is unavailable』，请检查 NODE_OPTIONS 是否包含 --no-experimental-strip-types；若是内存不足，请提高 Node 堆上限后重试。"

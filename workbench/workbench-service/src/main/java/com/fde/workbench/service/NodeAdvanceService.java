@@ -104,7 +104,10 @@ public class NodeAdvanceService {
                 file.setProjectId(locked.getProjectId());
                 file.setRequirementId(locked.getId());
                 file.setRefType(FileRecord.REF_TYPE_NODE_OUTPUT);
-                file.setOriginalName(itemKey + "." + extension);
+                // 登记名取模型写入时的文件名，不拼 itemKey：用户下载到的必须是"服务概述.md"这类
+                // 能认出对应哪一项交付的名字，而 itemKey 只是内部稳定键（如 output-2）。
+                // 磁盘副本仍按 <itemKey>.v<N>.<ext> 存放，避免同一输出项的多个版本互相覆盖。
+                file.setOriginalName(outputFileName(source, context.outputItem(), extension));
                 file.setStorageRelPath(nodeWorkflowService.storage().relativize(target));
                 file.setSizeBytes(copied.bytes());
                 file.setSha256(copied.sha256());
@@ -133,6 +136,24 @@ public class NodeAdvanceService {
         } finally {
             nodeWorkflowService.storagePaths().deleteQuietly(staged);
         }
+    }
+
+    /**
+     * 输出文件的登记名（用户下载时看到的文件名）。
+     * <p>
+     * 优先用模型写入时的文件名（`node_output_write` 已按"输出项名称 + 扩展名"生成），
+     * 这样下载下来就是「服务概述.md」；只有在拿不到文件名时才退回输出项名称。
+     *
+     * @param source 模型写入的文件（在 `.workbench/<nid>/` 下）
+     * @param item   输出项（用于兜底）
+     * @param extension 本次登记的扩展名（源文件没有扩展名时由这里补齐）
+     * @return 合法文件名
+     */
+    private static String outputFileName(Path source,
+                                        com.fde.workbench.service.vo.NodeSnapshots.OutputItem item,
+                                        String extension) {
+        String name = source.getFileName().toString();
+        return name.isBlank() ? item.itemKey() + "." + extension : name;
     }
 
     private boolean isSameContent(NodeOutputRecord current, String sha256) {

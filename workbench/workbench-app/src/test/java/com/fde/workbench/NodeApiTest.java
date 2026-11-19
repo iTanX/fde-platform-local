@@ -112,13 +112,13 @@ class NodeApiTest {
         long firstRecordId = first.path("inputRecordId").asLong();
         assertTrue(first.path("inputItemId").isNull(), "free 节点上传的 input_item_id 必须为 NULL");
         assertEquals("客户原话.md", first.path("originalName").asText());
-        // 落盘路径：<ws>/inputs/1/<fileId>_<原名>
+        // 落盘路径：<ws>/inputs/1/<原名>（不加前缀，用户下载到的就是原名）
         String relPath = jdbcTemplate.queryForObject(
                 "SELECT storage_rel_path FROM wb_file WHERE id = ?", String.class, first.path("fileId").asLong());
         assertTrue(relPath.startsWith("ws/" + fixture.requirementId + "/inputs/1/"),
                 "输入文件应落在 ws/<rid>/inputs/1/ 下：" + relPath);
-        assertTrue(relPath.endsWith("/" + first.path("fileId").asLong() + "_客户原话.md"),
-                "文件名应为 <fileId>_<原名>：" + relPath);
+        assertTrue(relPath.endsWith("/客户原话.md"),
+                "文件名应保持原名（不加 fileId 前缀）：" + relPath);
 
         // 第二次上传：累加，不覆盖
         JsonNode second = uploadOk(fixture.token, fixture.requirementId, node1, null,
@@ -564,7 +564,7 @@ class NodeApiTest {
     }
 
     @Test
-    void occupiedOutputPathRollsBackRegistrationAndAdvance() throws Exception {
+    void occupiedOutputPathIsOverwrittenByNewCommit() throws Exception {
         Fixture fixture = prepare("vfail", true);
         long node = fixture.nodes.get(0).id();
         uploadOk(fixture.token, fixture.requirementId, node, null, "输入.md", new byte[]{1});
@@ -572,17 +572,14 @@ class NodeApiTest {
                 .resolve("outputs/1/clarify-notes.v1.md");
         Files.createDirectories(target.getParent());
         Files.writeString(target, "已有内容");
-        commitExpect(fixture, node, "clarify-notes", "新内容", status().isBadGateway(), 19902);
-        assertEquals("已有内容", Files.readString(target));
-        assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
-        assertEquals(0, count("SELECT COUNT(*) FROM wb_requirement_node_output WHERE node_instance_id = ?", node));
-        assertEquals(0, count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ? AND ref_type = 'node_output'",
+        // 副本路径已存在时按覆盖处理（旧行为是 502）
+        // 覆盖成功即视为正常提交：登记 1 个版本，且必填项齐备后正常推进
+        commitOk(fixture, node, "clarify-notes", "新内容");
+        assertTrue(Files.readString(target).contains("新内容"), "副本应被新内容覆盖");
+        assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId));
+        assertEquals(1, count("SELECT COUNT(*) FROM wb_requirement_node_output WHERE node_instance_id = ?", node));
+        assertEquals(1, count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ? AND ref_type = 'node_output'",
                 fixture.requirementId));
-        Files.delete(target);
-        JsonNode retry = commit(fixture, node, "clarify-notes", "新内容");
-        assertEquals(1, retry.path("versionNo").asInt());
-        assertTrue(retry.path("advanced").asBoolean());
-        assertEquals("新内容", Files.readString(target));
     }
 
     @Test
@@ -723,7 +720,7 @@ class NodeApiTest {
         assertFalse(context.path("readonly").asBoolean());
         assertEquals("需求拆解", context.path("nextNodeName").asText());
         assertEquals(1, context.path("freeInputFiles").size());
-        assertEquals("inputs/1/" + uploaded.path("fileId").asLong() + "_客户原话.md",
+        assertEquals("inputs/1/客户原话.md",
                 context.path("freeInputFiles").get(0).path("relativePath").asText(),
                 "上下文里的文件路径必须是相对 workspace 的写法");
         assertEquals("clarify-notes", context.path("outputs").get(0).path("itemKey").asText());

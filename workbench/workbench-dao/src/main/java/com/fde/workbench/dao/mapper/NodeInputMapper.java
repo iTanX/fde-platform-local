@@ -41,6 +41,18 @@ public interface NodeInputMapper {
     List<NodeInputFile> selectByNode(@Param("nodeInstanceId") Long nodeInstanceId);
 
     /**
+     * 查同一节点、同一输入项下同名的既有输入记录（"重传同名文件 → 覆盖"时先清理旧记录）。
+     *
+     * @param nodeInstanceId 节点实例 ID
+     * @param inputItemId    输入项 ID；自由输入传 {@code null}
+     * @param originalName   原始文件名
+     * @return 命中的输入记录（可能多条，历史脏数据也一并清理）
+     */
+    List<NodeInputFile> selectByNodeAndName(@Param("nodeInstanceId") Long nodeInstanceId,
+                                            @Param("inputItemId") Long inputItemId,
+                                            @Param("originalName") String originalName);
+
+    /**
      * 统计某节点下的输入文件数（推进判定：free 节点至少 1 个）。
      *
      * @param nodeInstanceId 节点实例 ID

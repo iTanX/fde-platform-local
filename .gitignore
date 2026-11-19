@@ -19,3 +19,6 @@ runtime/
 
 # 本机私有变量（数据库密码等）：只提交 scripts/local.env.example
 scripts/local.env
+
+# 后端运行时数据（节点输入/输出文件的实际存放目录，由 FDE_STORAGE_ROOT 决定）
+data/

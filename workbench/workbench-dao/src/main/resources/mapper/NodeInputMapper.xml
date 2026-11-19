@@ -65,6 +65,19 @@
            AND i.input_item_id = #{inputItemId}
     </select>
 
+    <!--
+      同一节点下、同一输入项、同名的既有输入记录。
+      用于"用户重传同名文件 → 覆盖"的场景：磁盘按原名覆盖，数据库里旧的 wb_file 与
+      wb_requirement_node_input 必须一并清掉，否则旧记录会指向被覆盖后的内容（sha256/大小都对不上）。
+    -->
+    <select id="selectByNodeAndName" resultMap="NodeInputFileMap">
+        <include refid="NodeInputJoin"/>
+         WHERE i.node_instance_id = #{nodeInstanceId}
+           AND f.original_name = #{originalName}
+           AND ((i.input_item_id IS NULL AND #{inputItemId} IS NULL) OR i.input_item_id = #{inputItemId})
+         ORDER BY i.id ASC
+    </select>
+
     <!-- 三列一起限定：即使拿到别人的记录 ID，也删不掉别人节点下的数据 -->
     <delete id="deleteById">
         DELETE FROM wb_requirement_node_input

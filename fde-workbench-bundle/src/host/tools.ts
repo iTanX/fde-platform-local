@@ -386,10 +386,12 @@ export function registerTools(ctx: Context, options: RegisterToolsOptions): void
     name: 'node_output_write',
     description: 'Save the content of one output item into the node output directory and return the '
       + 'relativePath, sha256 and byte count that node_output_commit needs. This is the only allowed way to '
-      + 'save a deliverable (do not use write/edit/bash for it). The file name and extension follow the output '
-      + 'item, so pass just itemKey.',
+      + 'save a deliverable (do not use write/edit/bash for it). Name the file after the output item and give it '
+      + 'the extension that matches the content format (json/properties/yaml/md/csv/xlsx); the content format must '
+      + 'agree with the extension.',
     parameters: {
       itemKey: { type: 'string', required: true, description: 'Output item key exactly as listed by node_context_get.' },
+      fileName: { type: 'string', description: 'Extension selector for the deliverable, e.g. "运行参数.json". Only the extension is used: the file stem is always the output item name. The extension must match the actual content format (json/properties/yaml/md/csv/xlsx). Omit to use the default extension of the output item.' },
       content: { type: 'string', description: 'Full text content to write. Provide either content or sourcePath.' },
       sourcePath: { type: 'string', description: 'Existing file to copy (absolute, or relative to the workspace). Provide either content or sourcePath.' },
       nodeInstanceId: { type: 'integer', description: 'Node instance id from node_context_get. Omit to use the current node.' },
@@ -417,6 +419,7 @@ export function registerTools(ctx: Context, options: RegisterToolsOptions): void
             workspacePath,
             itemKey: args.itemKey,
             maxOutputBytes: settings.maxOutputBytes,
+            ...(args.fileName === undefined ? {} : { fileName: args.fileName }),
             ...(sourceName === undefined ? {} : { sourceName }),
           },
           bytes,

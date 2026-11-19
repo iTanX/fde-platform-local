@@ -159,7 +159,8 @@ await section('A6 写盘校验（prepareOutputWrite）', () => {
     { context, workspacePath: ws, itemKey: 'requirement-items', maxOutputBytes: 1024 * 1024 },
     Buffer.from('# 标题\n'),
   )
-  check('目标路径按 itemKey + fileKind 决定', ok.relativePath, '.workbench/101/requirement-items.md')
+  // 文件名取输出项名称（人看得懂），扩展名按 fileKind：不再用内部 itemKey 当文件名
+  check('目标路径按输出项名称 + fileKind 决定', ok.relativePath, '.workbench/101/需求条目清单.md')
   check('sha256 与内容一致', ok.sha256, sha256(Buffer.from('# 标题\n')))
 
   const cases: { label: string, expect: string, run: () => unknown }[] = [
@@ -183,7 +184,23 @@ await section('A6 写盘校验（prepareOutputWrite）', () => {
     { context, workspacePath: ws, itemKey: 'design-doc', maxOutputBytes: 1e6 },
     Buffer.from('docx-bytes'),
   )
-  check('document 项默认 .docx', doc.relativePath, '.workbench/101/design-doc.docx')
+  check('document 项默认 .docx', doc.relativePath, '.workbench/101/设计文档.docx')
+
+  // 显式文件名：主名与扩展名都以传入的为准（模型写 JSON 交付物时必须能指定 .json）
+  const explicit = prepareOutputWrite(
+    { context, workspacePath: ws, itemKey: 'any-report', fileName: '运行参数.json', maxOutputBytes: 1e6 },
+    Buffer.from('{}'),
+  )
+  // 主名固定为输出项名称（"运行参数"），fileName 只决定扩展名
+  check('fileName 只决定扩展名，主名仍是输出项名称', explicit.relativePath, '.workbench/101/运行参数.json')
+
+  // 文件名里的路径分隔符必须被清掉，不能借它写到别的目录
+  const sneaky = prepareOutputWrite(
+    { context, workspacePath: ws, itemKey: 'any-report', fileName: '../越界.md', maxOutputBytes: 1e6 },
+    Buffer.from('x'),
+  )
+  check('fileName 中的路径分隔符不能把文件带出输出目录', sneaky.relativePath.startsWith('.workbench/101/'), true)
+  check('越界文件名被替换成输出项名称', sneaky.relativePath, '.workbench/101/运行参数.md')
 })
 
 await section('A7 上下文 / 提交结果排版', () => {
@@ -261,10 +278,10 @@ await section('B1 工具注册到替身 ctx 并执行', async () => {
   // 2) node_output_write：真实落盘 + 真实 sha256
   const writeResult = await fake.call('node_output_write', { itemKey: 'requirement-items', content: '# 需求条目清单\n\n1. 工单自动分派\n' })
   check('node_output_write ok', writeResult.ok, true)
-  const target = join(fake.workspace, '.workbench/101/requirement-items.md')
+  const target = join(fake.workspace, '.workbench/101/需求条目清单.md')
   check('文件真的落盘', existsSync(target), true)
   check('返回值 sha256 = 磁盘 sha256', writeResult.data.sha256, sha256(readFileSync(target)))
-  check('返回值 relativePath', writeResult.data.relativePath, '.workbench/101/requirement-items.md')
+  check('返回值 relativePath 用输出项名称', writeResult.data.relativePath, '.workbench/101/需求条目清单.md')
   console.log(writeResult.message.split('\n').map(line => `    │ ${line}`).join('\n'))
 
   // 3) node_output_commit：走替身后端，原样回传 remaining
@@ -290,7 +307,7 @@ await section('B1 工具注册到替身 ctx 并执行', async () => {
   const commitCall = fake.requests.find(request => request.path.endsWith('/commit'))
   check('commit 请求路径', commitCall?.path, '/internal/nodes/101/outputs/requirement-items/commit')
   check('commit 请求体', commitCall?.body, {
-    relativePath: '.workbench/101/requirement-items.md',
+    relativePath: '.workbench/101/需求条目清单.md',
     sha256: writeResult.data.sha256,
     operator: 'agent',
   })
@@ -309,7 +326,7 @@ await section('B1 工具注册到替身 ctx 并执行', async () => {
   const markdownSource = join(fake.workspace, 'notes.md')
   writeFileSync(markdownSource, '# 笔记\n')
   const failures: [string, string, Record<string, unknown>, string][] = [
-    ['sha256 不一致', 'node_output_commit', { itemKey: 'requirement-items', relativePath: '.workbench/101/requirement-items.md', sha256: 'deadbeef' }, 'sha256 与磁盘内容不一致'],
+    ['sha256 不一致', 'node_output_commit', { itemKey: 'requirement-items', relativePath: '.workbench/101/需求条目清单.md', sha256: 'deadbeef' }, 'sha256 与磁盘内容不一致'],
     ['提交越界路径', 'node_output_commit', { itemKey: 'requirement-items', relativePath: '/etc/passwd', sha256: 'x' }, 'relativePath 必须在需求 workspace 之内'],
     ['提交不存在的文件', 'node_output_commit', { itemKey: 'acceptance-criteria', relativePath: '.workbench/101/acceptance-criteria.md', sha256: 'x' }, '文件不存在'],
     ['提交未知输出项', 'node_output_commit', { itemKey: 'ghost', relativePath: '.workbench/101/a.md', sha256: 'x' }, '不属于本节点'],
@@ -516,6 +533,7 @@ function fixtureContext(): any {
       { itemKey: 'requirement-items', name: '需求条目清单', fileKind: 'text', required: true, submitted: false, versionNo: null, fileName: null, relativePath: null, suggestPath: '.workbench/101/requirement-items.md' },
       { itemKey: 'acceptance-criteria', name: '验收标准', fileKind: 'text', required: true, submitted: false, versionNo: null, fileName: null, relativePath: null, suggestPath: '.workbench/101/acceptance-criteria.md' },
       { itemKey: 'design-doc', name: '设计文档', fileKind: 'document', required: false, submitted: false, versionNo: null, fileName: null, relativePath: null, suggestPath: '.workbench/101/design-doc.docx' },
+      { itemKey: 'any-report', name: '运行参数', fileKind: 'any', required: false, submitted: false, versionNo: null, fileName: null, relativePath: null, suggestPath: '.workbench/101/运行参数.json' },
     ],
     previousNode: {
       seq: 1,
