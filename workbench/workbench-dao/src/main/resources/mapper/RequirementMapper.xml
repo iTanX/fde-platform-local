@@ -2,11 +2,30 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <!--
-  需求表 wb_requirement 的只读 SQL（T3-1 只引入引用计数一条）。
+  需求与节点实例的 SQL（docs/api.md §7，docs/database/001_init.sql §6）：
+    wb_requirement / wb_requirement_node
+  以及"物理删除需求"时级联清理的会话三张表：
+    wb_agent_session / wb_session_runtime_info / wb_node_session_link
 
-  为什么流程删除要查这张表：wb_requirement.workflow_id 指向 wb_workflow.id（fk_requirement_workflow，RESTRICT），
-  但"流程删除"本身是 UPDATE deleted=1，不会触发外键——所以必须显式计数，口径见 api.md §6：
-  被需求引用 → 409/10403。
+  T3-1 只引入了 countByWorkflowId（流程删除前的引用计数）；T4-1 在同一 Mapper 上扩展需求增删改查与
+  节点实例写入，不另建第二套。
+
+  外键（全部 RESTRICT，脚本未写 ON DELETE）：
+    wb_requirement.workflow_id                 → wb_workflow.id          (fk_requirement_workflow)
+    wb_requirement_node.requirement_id         → wb_requirement.id       (fk_req_node_requirement)
+    wb_requirement_node.primary_session_id     → wb_agent_session.id     (fk_req_node_primary_session)
+    wb_file.requirement_id                     → wb_requirement.id       (fk_file_requirement)
+    wb_requirement_node_input.node_instance_id → wb_requirement_node.id  (fk_node_input_node)
+    wb_requirement_node_output.node_instance_id→ wb_requirement_node.id  (fk_node_output_node)
+    wb_agent_session.requirement_id            → wb_requirement.id       (fk_agent_session_requirement)
+    wb_session_runtime_info.agent_session_id   → wb_agent_session.id     (fk_session_runtime_session)
+    wb_session_runtime_info.last_node_instance_id → wb_requirement_node.id (fk_session_runtime_node)
+    wb_node_session_link.node_instance_id      → wb_requirement_node.id  (fk_link_node)
+    wb_node_session_link.agent_session_id      → wb_agent_session.id     (fk_link_session)
+  => 删除顺序见 RequirementMapper#deleteSessionRuntimeInfoByRequirement 等语句的注释。
+
+  乐观锁：wb_requirement 自带 revision INT 列，写操作用 "WHERE revision = 期望值" 比较并交换，
+  影响 0 行即 409/10402（与流程用 updated_at 当 revision 的做法不同，这里不需要换算）。
 -->
 <mapper namespace="com.fde.workbench.dao.mapper.RequirementMapper">
 
@@ -15,6 +34,209 @@
         SELECT COUNT(*)
           FROM wb_requirement
          WHERE workflow_id = #{workflowId}
+    </select>
+
+    <!-- ==================== 需求 ==================== -->
+
+    <resultMap id="RequirementMap" type="com.fde.workbench.dao.entity.Requirement">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="workflowId" column="workflow_id"/>
+        <result property="title" column="title"/>
+        <result property="description" column="description"/>
+        <result property="creatorId" column="creator_id"/>
+        <result property="status" column="status"/>
+        <result property="currentSeq" column="current_seq"/>
+        <result property="dshWorkspacePath" column="dsh_workspace_path"/>
+        <result property="revision" column="revision"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 需求 + 流程名称 + 节点实例统计（extends 复用基类映射） -->
+    <resultMap id="RequirementWithStatsMap" extends="RequirementMap"
+               type="com.fde.workbench.dao.entity.RequirementWithStats">
+        <result property="workflowName" column="workflow_name"/>
+        <result property="nodeCount" column="node_count"/>
+        <result property="doneNodeCount" column="done_node_count"/>
+    </resultMap>
+
+    <resultMap id="RequirementNodeMap" type="com.fde.workbench.dao.entity.RequirementNode">
+        <id property="id" column="id"/>
+        <result property="requirementId" column="requirement_id"/>
+        <result property="workflowNodeId" column="workflow_node_id"/>
+        <result property="seq" column="seq"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="inputType" column="input_type"/>
+        <result property="inputsSnapshot" column="inputs_snapshot"/>
+        <result property="outputsSnapshot" column="outputs_snapshot"/>
+        <result property="skillsSnapshot" column="skills_snapshot"/>
+        <result property="primarySessionId" column="primary_session_id"/>
+        <result property="status" column="status"/>
+        <result property="startedAt" column="started_at"/>
+        <result property="completedAt" column="completed_at"/>
+        <result property="completedBy" column="completed_by"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <!--
+      列表与详情共用的投影：流程名称 LEFT JOIN（流程逻辑删除后需求仍要展示来源名称），
+      节点数与已完成节点数用相关子查询统计【实例快照】而不是流程模板——
+      模板后续增删节点不该改变已有需求的进度（PRD AC-F2.2）。
+    -->
+    <sql id="RequirementStatsColumns">
+        r.id, r.project_id, r.workflow_id, r.title, r.description, r.creator_id, r.status,
+        r.current_seq, r.dsh_workspace_path, r.revision, r.created_at, r.updated_at,
+        w.name AS workflow_name,
+        (SELECT COUNT(*) FROM wb_requirement_node n WHERE n.requirement_id = r.id) AS node_count,
+        (SELECT COUNT(*) FROM wb_requirement_node n WHERE n.requirement_id = r.id AND n.status = 'done')
+            AS done_node_count
+    </sql>
+
+    <select id="countByProject" resultType="long">
+        SELECT COUNT(*)
+          FROM wb_requirement r
+         WHERE r.project_id = #{projectId}
+        <if test="keyword != null">
+            <!-- 标题模糊匹配：LIKE 的通配符与转义符都转义，避免用户输入的 % 变成"全匹配" -->
+            AND r.title LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\'
+        </if>
+        <if test="status != null">
+            AND r.status = #{status}
+        </if>
+    </select>
+
+    <select id="selectByProject" resultMap="RequirementWithStatsMap">
+        SELECT <include refid="RequirementStatsColumns"/>
+          FROM wb_requirement r
+          LEFT JOIN wb_workflow w ON w.id = r.workflow_id
+         WHERE r.project_id = #{projectId}
+        <if test="keyword != null">
+            AND r.title LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\'
+        </if>
+        <if test="status != null">
+            AND r.status = #{status}
+        </if>
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="selectById" resultMap="RequirementWithStatsMap">
+        SELECT <include refid="RequirementStatsColumns"/>
+          FROM wb_requirement r
+          LEFT JOIN wb_workflow w ON w.id = r.workflow_id
+         WHERE r.id = #{id}
+    </select>
+
+    <!--
+      插入需求。dsh_workspace_path 为 NOT NULL 且允许回填，因此这里先写调用方给的占位值
+      （同一事务内的临时值），拿到自增 ID 后由 updateWorkspacePath 换成正式绝对路径。
+    -->
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.Requirement"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_requirement (project_id, workflow_id, title, description, creator_id, status,
+                                    current_seq, dsh_workspace_path, revision, created_at, updated_at)
+        VALUES (#{projectId}, #{workflowId}, #{title}, #{description}, #{creatorId}, #{status},
+                #{currentSeq}, #{dshWorkspacePath}, #{revision}, #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateWorkspacePath">
+        UPDATE wb_requirement
+           SET dsh_workspace_path = #{path},
+               updated_at = #{now}
+         WHERE id = #{id}
+    </update>
+
+    <!-- 编辑：比较并交换 revision（+1），不做"先查后改"，避免两个人同时编辑时后写覆盖前写 -->
+    <update id="updateTitleAndDescription">
+        UPDATE wb_requirement
+           SET title = #{title},
+               description = #{description},
+               revision = revision + 1,
+               updated_at = #{now}
+         WHERE id = #{id}
+           AND revision = #{expected}
+    </update>
+
+    <!-- 物理删除：需求表没有 deleted 列，删除前必须先清理全部子表（见接口注释里的顺序） -->
+    <delete id="deleteById">
+        DELETE FROM wb_requirement
+         WHERE id = #{id}
+           AND revision = #{revision}
+    </delete>
+
+    <!-- ==================== 节点实例 ==================== -->
+
+    <insert id="insertNodes" useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_requirement_node (requirement_id, workflow_node_id, seq, name, description, input_type,
+                                         inputs_snapshot, outputs_snapshot, skills_snapshot, primary_session_id,
+                                         status, started_at, completed_at, completed_by, created_at)
+        VALUES
+        <foreach collection="nodes" item="node" separator=",">
+            (#{node.requirementId}, #{node.workflowNodeId}, #{node.seq}, #{node.name}, #{node.description},
+             #{node.inputType}, #{node.inputsSnapshot}, #{node.outputsSnapshot}, #{node.skillsSnapshot},
+             #{node.primarySessionId}, #{node.status}, #{node.startedAt}, #{node.completedAt},
+             #{node.completedBy}, #{node.createdAt})
+        </foreach>
+    </insert>
+
+    <select id="selectNodesByRequirement" resultMap="RequirementNodeMap">
+        SELECT id, requirement_id, workflow_node_id, seq, name, description, input_type,
+               inputs_snapshot, outputs_snapshot, skills_snapshot, primary_session_id, status,
+               started_at, completed_at, completed_by, created_at
+          FROM wb_requirement_node
+         WHERE requirement_id = #{requirementId}
+         ORDER BY seq ASC, id ASC
+    </select>
+
+    <select id="countNodesByRequirement" resultType="int">
+        SELECT COUNT(*)
+          FROM wb_requirement_node
+         WHERE requirement_id = #{requirementId}
+    </select>
+
+    <delete id="deleteNodesByRequirement">
+        DELETE FROM wb_requirement_node
+         WHERE requirement_id = #{requirementId}
+    </delete>
+
+    <!-- ==================== 会话关联（物理删除需求时的级联） ==================== -->
+
+    <!-- 先解除"节点 → 会话"的外键，否则删会话时 fk_req_node_primary_session 会挡住 -->
+    <update id="clearPrimarySessionByRequirement">
+        UPDATE wb_requirement_node
+           SET primary_session_id = NULL
+         WHERE requirement_id = #{requirementId}
+           AND primary_session_id IS NOT NULL
+    </update>
+
+    <!-- 运行时信息同时引用会话与节点，必须最先删（两边外键都指着它） -->
+    <delete id="deleteSessionRuntimeInfoByRequirement">
+        DELETE i
+          FROM wb_session_runtime_info i
+          JOIN wb_agent_session s ON s.id = i.agent_session_id
+         WHERE s.requirement_id = #{requirementId}
+    </delete>
+
+    <!-- 节点与会话的弱关联：按"节点属于本需求"删，可覆盖"会话已被别的需求占用"的异常数据，
+         且必须在删节点之前执行（fk_link_node RESTRICT） -->
+    <delete id="deleteNodeSessionLinksByRequirement">
+        DELETE l
+          FROM wb_node_session_link l
+          JOIN wb_requirement_node n ON n.id = l.node_instance_id
+         WHERE n.requirement_id = #{requirementId}
+    </delete>
+
+    <delete id="deleteSessionsByRequirement">
+        DELETE FROM wb_agent_session
+         WHERE requirement_id = #{requirementId}
+    </delete>
+
+    <select id="countSessionsByRequirement" resultType="int">
+        SELECT COUNT(*)
+          FROM wb_agent_session
+         WHERE requirement_id = #{requirementId}
     </select>
 
 </mapper>

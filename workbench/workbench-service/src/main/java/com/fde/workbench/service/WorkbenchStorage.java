@@ -5,6 +5,7 @@ import com.fde.workbench.common.error.ErrorCode;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -40,6 +41,9 @@ public class WorkbenchStorage {
 
     /** 技能子目录名 */
     private static final String SKILLS_DIR = "skills";
+
+    /** DSH workspace 根目录名（docs/database.md §5.5：{@code <storage-root>/ws/<requirementId>}） */
+    private static final String WORKSPACE_DIR = "ws";
 
     /** 相对路径长度上限（与 wb_file.storage_rel_path VARCHAR(1000) 对齐，留出余量） */
     private static final int MAX_RELATIVE_LENGTH = 1000;
@@ -91,6 +95,84 @@ public class WorkbenchStorage {
                 + "/" + SKILLS_DIR + "/" + skillId
                 + "/v" + versionNo;
         return resolve(relative);
+    }
+
+    /**
+     * 需求 DSH workspace 目录：{@code <root>/ws/<requirementId>}（绝对路径，docs/database.md §5.5）。
+     * <p>
+     * 只做拼接与"根内"校验，不创建目录（创建由 {@link #createRequirementWorkspace} 负责），
+     * 这样读取类操作（T5-1 的节点上下文、会话定位）不会因为目录不存在而在磁盘上造出空目录。
+     * 数据库 {@code wb_requirement.dsh_workspace_path} 存的就是本方法的返回值（字符串形态）：
+     * 模型与 DSH 都以"绝对路径"作为 workspace 根（docs/architecture.md AD-4：需求 = 一个 workspace）。
+     *
+     * @param requirementId 需求 ID（必须已是已落库的自增 ID）
+     * @return workspace 目录绝对路径
+     */
+    public Path requirementWorkspaceDir(Long requirementId) {
+        if (requirementId == null) {
+            throw new IllegalStateException("需求 workspace 目录参数为空：requirementId=null");
+        }
+        return resolve(WORKSPACE_DIR + "/" + requirementId);
+    }
+
+    /**
+     * 创建需求 workspace 目录，返回绝对路径字符串（用于 {@code dsh_workspace_path}）。
+     * <p>
+     * 若目录已存在，返回"是否由本次创建"的标记而不是直接成功：按 {@code ws/<requirementId>}
+     * 这个可预测路径创建时，<b>已存在的目录可能属于另一个需求</b>（MySQL 自增 ID 在回滚后会被复用）。
+     * 调用方据此判定"撞路径 → 409 重试"，避免两个需求共用一个 workspace 造成会话与文件互相可见
+     * （PRD REQ-X1 要求需求级隔离）。
+     *
+     * @param requirementId 需求 ID
+     * @return 创建结果（绝对路径 + 是否新建）
+     * @throws BizException 路径越界 → 400/10001；磁盘不可写 → 502/19902
+     */
+    public WorkspaceCreation createRequirementWorkspace(Long requirementId) {
+        Path dir = requirementWorkspaceDir(requirementId);
+        // 先检查符号链接：ws/<id> 若被换成指向根外的软链，写入会被重定向到存储根之外
+        requireNoSymlink(dir);
+        boolean existed = Files.exists(dir, LinkOption.NOFOLLOW_LINKS);
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException ex) {
+            throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "需求 workspace 目录创建失败：" + dir);
+        }
+        return new WorkspaceCreation(dir.toString(), !existed);
+    }
+
+    /**
+     * 删除需求 workspace 目录（需求物理删除后清理自己的目录）。
+     * <p>
+     * 只删 {@code ws/<requirementId>} 这一层：编辑器 / 模型可能在其中写了大量文件，递归删除会
+     * 变成潜在的危险操作，因此目录非空时保留并返回 false，由运维按留存策略处理
+     * （api.md §7 / PRD AC-F1.3："文件按留存策略保留或清理"——这里选择保留非空目录）。
+     *
+     * @param requirementId 需求 ID
+     * @return true 表示目录已不存在或已删除；false 表示目录非空被保留
+     */
+    public boolean deleteRequirementWorkspaceIfEmpty(Long requirementId) {
+        Path dir = requirementWorkspaceDir(requirementId);
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+            return true;
+        }
+        try {
+            Files.delete(dir);
+            return true;
+        } catch (DirectoryNotEmptyException ex) {
+            return false;
+        } catch (IOException ex) {
+            // 删除失败不影响业务结果（数据库已删干净），只记录日志
+            return false;
+        }
+    }
+
+    /**
+     * workspace 目录创建结果。
+     *
+     * @param absolutePath 目录绝对路径（字符串，直接写入 dsh_workspace_path）
+     * @param created      true 表示本次新建；false 表示目录在创建前就已存在
+     */
+    public record WorkspaceCreation(String absolutePath, boolean created) {
     }
 
     /**

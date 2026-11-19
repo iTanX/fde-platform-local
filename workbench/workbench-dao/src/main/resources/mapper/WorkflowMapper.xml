@@ -148,6 +148,14 @@
          ORDER BY seq ASC, id ASC
     </select>
 
+    <select id="selectRecentWorkspacePaths" resultType="string">
+        SELECT dsh_workspace_path
+          FROM wb_requirement
+         WHERE workflow_id = #{workflowId}
+         ORDER BY id DESC
+         LIMIT #{limit}
+    </select>
+
     <select id="selectNodeDetails" resultMap="NodeRowMap">
         SELECT n.id           AS node_id,
                n.seq          AS node_seq,
@@ -177,6 +185,35 @@
           LEFT JOIN wb_node_output_item o ON o.node_id = n.id
          WHERE n.workflow_id = #{workflowId}
          ORDER BY n.seq ASC, n.id ASC, ns.seq ASC, i.seq ASC, o.seq ASC
+    </select>
+
+    <resultMap id="NodeSkillDetailMap" type="com.fde.workbench.dao.entity.WorkflowNodeSkillDetail">
+        <result property="nodeId" column="node_id"/>
+        <result property="nodeSkillSeq" column="node_skill_seq"/>
+        <result property="skillId" column="skill_id"/>
+        <result property="skillName" column="skill_name"/>
+        <result property="currentVersionId" column="current_version_id"/>
+        <result property="currentVersionNo" column="current_version_no"/>
+    </resultMap>
+
+    <!--
+      节点技能 + 技能当前版本号：需求创建时写 skills_snapshot（T4-1）。
+      只 JOIN 技能与技能版本（一对一），不会像 selectNodeDetails 那样和输入项/输出项做笛卡尔积。
+      技能刚创建、current_version_id 为 NULL 时两列都为 NULL，快照里如实写成 null。
+    -->
+    <select id="selectNodeSkillsDetail" resultMap="NodeSkillDetailMap">
+        SELECT n.id            AS node_id,
+               ns.seq          AS node_skill_seq,
+               s.id            AS skill_id,
+               s.name          AS skill_name,
+               s.current_version_id,
+               v.version_no    AS current_version_no
+          FROM wb_workflow_node n
+          JOIN wb_workflow_node_skill ns ON ns.node_id = n.id
+          JOIN wb_skill s ON s.id = ns.skill_id
+          LEFT JOIN wb_skill_version v ON v.id = s.current_version_id
+         WHERE n.workflow_id = #{workflowId}
+         ORDER BY n.seq ASC, n.id ASC, ns.seq ASC, ns.id ASC
     </select>
 
     <insert id="insertNode" parameterType="com.fde.workbench.dao.entity.WorkflowNode"

@@ -42,6 +42,18 @@ public interface SkillMapper {
     Skill selectById(@Param("id") Long id);
 
     /**
+     * 按主键查询未删除的技能，并带出当前版本号（{@link SkillWithStats#getCurrentVersionNo()}）。
+     * <p>
+     * 需求创建时要把技能"当前版本"快照进 {@code skills_snapshot}（含 {@code versionId} 与
+     * {@code versionNo}），而 {@link Skill} 上只有 {@code current_version_id}，因此需要这一条查询。
+     * {@code usageCount} 不参与本查询（保持为 null，调用方不要读）。
+     *
+     * @param id 技能 ID
+     * @return 技能 + 当前版本号；不存在 / 已逻辑删除返回 null
+     */
+    SkillWithStats selectWithCurrentVersionById(@Param("id") Long id);
+
+    /**
      * 按"项目 + 名称"查询未删除的技能，用于判断同名上传是升级还是新建。
      *
      * @param projectId 项目 ID

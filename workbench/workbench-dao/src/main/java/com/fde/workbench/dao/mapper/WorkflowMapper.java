@@ -6,6 +6,7 @@ import com.fde.workbench.dao.entity.Workflow;
 import com.fde.workbench.dao.entity.WorkflowNode;
 import com.fde.workbench.dao.entity.WorkflowNodeRow;
 import com.fde.workbench.dao.entity.WorkflowNodeSkill;
+import com.fde.workbench.dao.entity.WorkflowNodeSkillDetail;
 import com.fde.workbench.dao.entity.WorkflowWithStats;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -105,6 +106,20 @@ public interface WorkflowMapper {
                     @Param("expected") LocalDateTime expected,
                     @Param("updatedAt") LocalDateTime updatedAt);
 
+    /**
+     * 查询某流程下最近的 {@code limit} 个需求的工作区路径。
+     * <p>
+     * 用途（T4-1）：需求创建时先把 workspace 目录名定为自增 ID，但 MySQL 分配 ID 时不会告诉你
+     * "这个 ID 以前是否被用掉过"。若靠可预测路径创建目录失败，需要确认"是不是另一个流程的需求
+     * 刚好占用了这个 ID" 才能给出正确的 409 文案，而不是把磁盘错误当成 500。
+     *
+     * @param workflowId 流程 ID
+     * @param limit      最多返回条数
+     * @return 工作区路径列表（需求 ID 降序）
+     */
+    List<String> selectRecentWorkspacePaths(@Param("workflowId") Long workflowId,
+                                            @Param("limit") int limit);
+
     // ------------------------------------------------------------------
     // 节点（wb_workflow_node）
     // ------------------------------------------------------------------
@@ -124,6 +139,18 @@ public interface WorkflowMapper {
      * @return 节点 + 子项的展平行，按节点 {@code seq} 排序
      */
     List<WorkflowNodeRow> selectNodeDetails(@Param("workflowId") Long workflowId);
+
+    /**
+     * 流程下全部节点的技能关联 + 技能当前版本（供需求创建时写 {@code skills_snapshot}）。
+     * <p>
+     * 与 {@link #selectNodeDetails} 的区别：这里带上 {@code current_version_id} 与 {@code version_no}，
+     * 且不做输入项 / 输出项的笛卡尔积（只 JOIN 技能与技能版本两张一对一关系的表），
+     * 因此行数恰好等于"节点 × 技能"。
+     *
+     * @param workflowId 流程 ID
+     * @return 技能行，按节点 seq、技能 seq 升序
+     */
+    List<WorkflowNodeSkillDetail> selectNodeSkillsDetail(@Param("workflowId") Long workflowId);
 
     /**
      * 新建节点。

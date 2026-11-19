@@ -104,6 +104,21 @@
            AND deleted = 0
     </select>
 
+    <!--
+      技能 + 当前版本号：需求创建时要把 skills_snapshot 里的 versionNo 一起快照（T4-1），
+      单查 selectById 只有 current_version_id，拿不到对外展示的版本号，因此单独一条语句。
+      current_version_id 指向的是唯一一行版本，JOIN 不会放大行数。
+    -->
+    <select id="selectWithCurrentVersionById" resultMap="SkillWithStatsMap">
+        SELECT s.id, s.project_id, s.name, s.description, s.current_version_id, s.created_by, s.deleted,
+               s.created_at, s.updated_at,
+               v.version_no AS current_version_no
+          FROM wb_skill s
+          LEFT JOIN wb_skill_version v ON v.id = s.current_version_id
+         WHERE s.id = #{id}
+           AND s.deleted = 0
+    </select>
+
     <select id="selectByProjectAndName" resultMap="BaseMap">
         SELECT id, project_id, name, description, current_version_id, created_by, deleted, created_at, updated_at
           FROM wb_skill
