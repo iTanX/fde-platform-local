@@ -181,11 +181,12 @@ fde-platform-local/
 #### T0-4 自带可携带 dsh 的构建与启动（新增）
 
 - 依赖：T0-3（插件产物可加载）、T0-1（后端可启动）
-- 目标：在一台**未安装 DeepSeek Harness** 的电脑上，仅装 Node 后执行一条命令即可运行本项目；用户用浏览器访问即可使用；用户本机已有 DSH 时互不干扰。
+- 目标：在一台**未安装 DeepSeek Harness** 的电脑上（需要 Node ≥ 24.9 与网络），执行一条 `setup-runtime` 完成构建、再一条 `start-all` 启动即可用浏览器访问；用户本机已有 DSH 时互不干扰。
+- 分发方式（已确认）：**目标机现场构建**，仓库不携带 `runtime/` 与构建产物。
 - 产出：
   - `scripts/setup-runtime.sh` / `.ps1`：按固定 tag（`dsh-v0.2.2-rc.5`）拉取或使用本地副本构建自带 dsh，产出 `runtime/dsh`；生成 `runtime/profile`（bundles = 官方 web bundle + `fde-workbench-bundle`）；安装插件依赖
   - `scripts/start-all.sh` / `.ps1`：以 `DSH_HOME=<repo>/runtime/dsh-home`、独立端口启动 **`dsh web`**（浏览器形态，默认 `http://127.0.0.1:3080`）；同时拉起 Java 后端；启动成功后打印可直接点击的访问地址；任一失败给出明确原因
-  - `docs/runtime.md`：目录约定、构建步骤、端口、升级方式、搬运到新机器的步骤、故障排查
+  - `docs/runtime.md`：目录约定、目标机前置条件（Node/pnpm/网络/MySQL）、首次构建步骤、启动、升级方式、换机器部署步骤、常见故障（离线、端口占用、授权链接）
   - `.gitignore` 增加 `runtime/`
 - 约束：
   - **绝不写入 `~/.dsh`**；不读取用户本机 DSH 的任何数据
