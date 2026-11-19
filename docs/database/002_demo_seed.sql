@@ -70,3 +70,8 @@ VALUES
 -- 第 1 节点（自由输入）也给一个输出项，便于在第一个节点就能验证产出闭环
 INSERT IGNORE INTO `wb_node_output_item` (`id`, `node_id`, `seq`, `item_key`, `name`, `description`, `file_kind`, `required`, `created_at`)
 VALUES (3, 1, 1, 'clarify-notes', '澄清记录', '记录客户原话、问题清单与待确认事项', 'text', 1, @now);
+
+-- 第 3 节点同样必须有输出项：流程保存接口要求「每个节点至少 1 个输出项」，
+-- 种子数据缺这一项会导致该流程无法通过 API 原样保存或还原。
+INSERT IGNORE INTO `wb_node_output_item` (`id`, `node_id`, `seq`, `item_key`, `name`, `description`, `file_kind`, `required`, `created_at`)
+VALUES (4, 3, 1, 'confirm-summary', '确认结论', '记录需求确认结论、残留问题与下一步', 'text', 1, @now);

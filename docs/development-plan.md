@@ -236,6 +236,8 @@ updated: "2026-11-19"
 **产出**
 
 - `README.md`：环境要求、构建、启动（MySQL / Java / 插件构建与安装）。
+- **测试库隔离**：集成测试改为连接独立的 `fde_workbench_test`（由 `001_init.sql` 建库，或测试启动时自动建），不再写共享开发库。当前是已知技术债，见 [task-decomposition.md §0.4](task-decomposition.md)。
+- 一键复位脚本 `scripts/sql/reset-demo-data.sql` 的验证。
 - 部署校验脚本：执行 DDL → 启动 → 健康检查。
 - DSH 版本兼容说明表（实测版本、`order` 实际值、Slot 名）。
 - 已知问题清单。
