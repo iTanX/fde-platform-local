@@ -10,7 +10,7 @@ executor: "subagents"
 
 > 本文是可执行的任务事实源。`lead` 负责定边界、写验收、派发、与用户确认；**所有代码由 subagent 实现**。任务完成状态以子代理回传的真实证据为准，未验证不勾选。
 >
-> **部署原则（2026-11-19 确认）**：本项目**自带一个可携带的 dsh**，不依赖也不修改用户本机已安装的 DeepSeek Harness。所有 dsh 数据、profile、端口均与用户环境隔离。详见 [architecture.md §13](architecture.md#13-自带可携带的-deepseek-harness部署原则)。
+> **部署原则（2026-11-19 确认）**：本项目**自带一个可携带的 dsh**，不依赖也不修改用户本机已安装的 DeepSeek Harness；运行形态为**浏览器网页**（`dsh web`，默认 `http://127.0.0.1:3080`）。所有 dsh 数据、profile、端口均与用户环境隔离。详见 [architecture.md §13](architecture.md#13-自带可携带的-deepseek-harness部署原则)。
 
 ## 0. 协作规则
 
@@ -181,10 +181,10 @@ fde-platform-local/
 #### T0-4 自带可携带 dsh 的构建与启动（新增）
 
 - 依赖：T0-3（插件产物可加载）、T0-1（后端可启动）
-- 目标：在一台**未安装 DeepSeek Harness** 的电脑上，仅装 Node 后执行一条命令即可运行本项目；用户本机已有 DSH 时互不干扰。
+- 目标：在一台**未安装 DeepSeek Harness** 的电脑上，仅装 Node 后执行一条命令即可运行本项目；用户用浏览器访问即可使用；用户本机已有 DSH 时互不干扰。
 - 产出：
   - `scripts/setup-runtime.sh` / `.ps1`：按固定 tag（`dsh-v0.2.2-rc.5`）拉取或使用本地副本构建自带 dsh，产出 `runtime/dsh`；生成 `runtime/profile`（bundles = 官方 web bundle + `fde-workbench-bundle`）；安装插件依赖
-  - `scripts/start-all.sh` / `.ps1`：以 `DSH_HOME=<repo>/runtime/dsh-home`、独立端口启动 dsh；同时拉起 Java 后端；任一失败给出明确原因
+  - `scripts/start-all.sh` / `.ps1`：以 `DSH_HOME=<repo>/runtime/dsh-home`、独立端口启动 **`dsh web`**（浏览器形态，默认 `http://127.0.0.1:3080`）；同时拉起 Java 后端；启动成功后打印可直接点击的访问地址；任一失败给出明确原因
   - `docs/runtime.md`：目录约定、构建步骤、端口、升级方式、搬运到新机器的步骤、故障排查
   - `.gitignore` 增加 `runtime/`
 - 约束：
@@ -198,9 +198,9 @@ fde-platform-local/
   ./scripts/setup-runtime.sh          # 成功产出 runtime/dsh 与 profile
   ./scripts/start-all.sh &            # dsh 与后端同时起来
   curl -s http://127.0.0.1:8081/api/health          # db=ok
-  curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080   # 200
+  curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080   # 200（dsh web 页面可达）
   ```
-  期望：用户本机 `~/Library/Application Support/@deepseek-ai/dsh-desktop` 与 `~/.dsh` **内容无变化**（可用 `ls -la` 前后对比、或比对文件数量）
+  期望：浏览器打开 `http://127.0.0.1:3080` 可进入 DSH Web 界面且侧栏出现「Web 工作台」；用户本机 `~/.dsh` 与 Desktop 应用数据**内容无变化**（可用 `ls -la` 前后对比、或比对文件数量）
 - 回传：构建耗时与体积、启动日志、两个端口探测结果、`~/.dsh` 未被写证明、搬运可行性结论（单目录大小、是否依赖全局 node_modules）
 
 > 现状参考：Desktop 安装包内的 `app.asar` 是归档文件，其内 node_modules 不能直接作为可搬运运行时；参考项目 `refer/FF-FDE-Delivery-Workbench/upstream/deepseek-harness` 有完整源码与 `corepack pnpm` 构建流程，可作起点。版本须与插件目标版本一致（`0.2.2-rc.5`）。
@@ -423,7 +423,7 @@ fde-platform-local/
 | # | 项 | 影响 |
 |---|---|---|
 | C1 | ~~插件构建方式~~ 已确认：官方 `tsdown.client.ts` 的 `clientBundle` 预设，在 DSH 源码 checkout 副本内构建 | — |
-| C6 | 自带 dsh 的运行形态：桌面窗口 vs 浏览器网页 | 决定 T0-4 的启动方式与打包体积 |
+| C6 | ~~自带 dsh 的运行形态~~ 已确认：浏览器网页（`dsh web`） | — |
 | C2 | 后端启动时数据库密码如何提供（环境变量 / 本地配置文件） | T0-1 |
 | C3 | 是否需要给用户提供 Docker 一键启动 | T6-1 |
 | C4 | ~~git 提交~~ 已确认：按任务卡粒度提交 | — |
