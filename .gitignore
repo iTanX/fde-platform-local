@@ -13,3 +13,9 @@ dist/
 # 运行数据
 *.log
 .DS_Store
+
+# 自带可携带 dsh 的构建产物与运行数据（由 scripts/setup-runtime.sh 生成，见 docs/runtime.md）
+runtime/
+
+# 本机私有变量（数据库密码等）：只提交 scripts/local.env.example
+scripts/local.env
