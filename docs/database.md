@@ -144,13 +144,14 @@ wb_requirement_node 1──n wb_requirement_node_output n──1 wb_file
 │   ├── skills/<skillId>/v<versionNo>/<原始相对路径>     # 技能包解包后的文件
 │   └── requirements/<requirementId>/
 │       ├── inputs/<nodeSeq>/<fileId>_<原始文件名>       # 节点输入
-│       ├── outputs/<nodeSeq>/<itemKey>.<ext>            # 节点输出（模型写入）
+│       ├── outputs/<nodeSeq>/<itemKey>.v<N>.<ext>       # 节点输出登记副本（按版本号命名，历史版本内容可回取）
 │       └── docs/                                        # 需求说明等附属资料
 └── ws/<requirementId>/                                  # 该需求的 DSH workspace 根
 ```
 
 - DSH workspace 根 `<storage-root>/ws/<requirementId>` 通过软链或直接目录指向 `requirements/<requirementId>`，模型以相对路径读写，跨会话、跨节点自然持久。
 - 模型固定写入目录：`.workbench/<nodeInstanceId>/<itemKey>.<ext>`，`node_output_write` 工具拒绝写到该目录之外。
+- **提交时后端把模型文件复制为登记副本** `outputs/<nodeSeq>/<itemKey>.v<N>.<ext>`，`wb_file.storage_rel_path` 指向副本。按版本号命名是为了让**历史版本内容可回取**：若固定同名，新版本会覆盖旧文件，`wb_file` 里的旧记录就指向了被覆盖的内容。
 
 ## 6. 索引与外键说明
 

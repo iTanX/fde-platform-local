@@ -210,9 +210,10 @@ main 面板 children 声明 '{ workbench.node.chat: { kind: 'single', scope: 'se
 | 概念 | 路径 |
 |---|---|
 | 需求 workspace | `<storageRoot>/ws/<requirementId>`（DSH session cwd） |
-| 模型输出目录 | `.workbench/<nodeInstanceId>/<itemKey>.<ext>` |
+| 模型输出目录 | `.workbench/<nodeInstanceId>/<itemKey>.<ext>`（模型唯一允许写的位置） |
+| 输出登记副本 | `outputs/<nodeSeq>/<itemKey>.v<N>.<ext>`（commit 时由后端复制，按版本号命名保留历史内容） |
 | 节点输入 | `inputs/<nodeSeq>/<fileId>_<原名>` |
-| 上一节点输出 | `outputs/<nodeSeq>/<itemKey>.<ext>` |
+| 上一节点输出 | 同上 `outputs/<nodeSeq>/<itemKey>.v<N>.<ext>` |
 
 - 因为**一个需求一个 workspace**，模型天然只能看到本需求的资料；跨需求隔离由 DSH workspace 提供，无需额外沙箱逻辑。
 - 因为输出写在 workspace 内，Harness 的 `read`/`glob`/`grep` 等原生工具可以直接读到，页面也能同时看到。
