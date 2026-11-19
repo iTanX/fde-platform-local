@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "title": "Web 工作台",
+    "description": "FDE 交付工作台：项目中心、需求节点与会话协作集中在一个面板里。"
+  },
+  "panel": {
+    "label": "Web 工作台"
+  },
+  "workbench": {
+    "title": "Web 工作台",
+    "back": "返回",
+    "backHint": "退出工作台面板，回到当前会话",
+    "placeholder": "工作台外壳已就绪。项目中心、需求与节点页面将在后续阶段接入。",
+    "smokeHint": "下方嵌入的是一个真实 DSH 会话，用于验证会话嵌入链路。"
+  },
+  "session": {
+    "heading": "节点会话",
+    "source": "会话来源：{value}",
+    "sourceSelected": "当前选中的会话",
+    "sourceRecent": "最近活跃的会话",
+    "loading": "正在读取会话…",
+    "empty": "当前没有可用的 DSH 会话。",
+    "error": "会话加载失败：{message}",
+    "retry": "重试",
+    "create": "新建会话",
+    "reload": "刷新会话列表",
+    "missing": "找不到可嵌入的会话。请新建一个会话后重试。",
+    "switch": "切换到其它会话",
+    "noSession": "（未选择）"
+  }
+}

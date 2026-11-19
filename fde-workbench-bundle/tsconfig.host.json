@@ -1,0 +1,25 @@
+{
+  // 「Host 半」的 TypeScript 工程：src/host/index.ts → lib/types/index.js。
+  // 只依赖 Node 内置类型，不含浏览器代码（浏览器代码在 tsconfig.client.json）。
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2024"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": false,
+    "composite": false,
+    "incremental": false,
+    "outDir": "lib/types",
+    "rootDir": "src",
+    "types": []
+  },
+  "include": ["src/host/**/*.ts"]
+}

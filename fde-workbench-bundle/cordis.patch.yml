@@ -1,0 +1,19 @@
+# Web 工作台插件包（DSH bundle patch）
+#
+# 这是一个「插件包（bundle）」补丁层：dsh 的 plugin-manager 在安装本包后，
+# 把本文件里的 insert 行补进 profile（~/.dsh/profiles/desktop）的插件树。
+#
+# 两行的作用：
+#   - fde-workbench（Host 行）：加载本包根入口 lib/index.js（src/host/index.ts），
+#     本阶段是空实现；它同时是「让本包出现在插件管理器列表里」的那一行。
+#   - fde-workbench-client（Client 行）：加载同一个包的 Client 半。
+#     client-modules 节点半年只看得到「已注册的 Host 行」，并读它的 package.json：
+#     dsh.client.platform === 'web' 且 exports["./client"] 存在，就把 lib/client.js
+#     作为浏览器 bundle 下发给前端（/plugins/@local/dsh-workbench-bundle/client.js）。
+#     因此 Client 行必须与 Host 行同名同包，不能单独指向别的包。
+- insert:
+    - id: fde-workbench
+      name: '@local/dsh-workbench-bundle'
+
+    - id: fde-workbench-client
+      name: '@local/dsh-workbench-bundle'

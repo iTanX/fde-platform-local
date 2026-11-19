@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "title": "Web Workbench",
+    "description": "FDE delivery workbench: project center, requirement nodes, and session collaboration in one panel."
+  },
+  "panel": {
+    "label": "Web Workbench"
+  },
+  "workbench": {
+    "title": "Web Workbench",
+    "back": "Back",
+    "backHint": "Leave the workbench panel and return to the current session",
+    "placeholder": "The workbench shell is ready. Project center, requirement, and node pages arrive in later stages.",
+    "smokeHint": "The session below is a real DSH conversation, used to verify the embedding path."
+  },
+  "session": {
+    "heading": "Node session",
+    "source": "Session source: {value}",
+    "sourceSelected": "the session selected in the sidebar",
+    "sourceRecent": "the most recently active session",
+    "loading": "Loading the session…",
+    "empty": "No DSH session is available.",
+    "error": "The session failed to load: {message}",
+    "retry": "Retry",
+    "create": "New session",
+    "reload": "Refresh session list",
+    "missing": "No embeddable session was found. Create a new session and try again.",
+    "switch": "Switch session",
+    "noSession": "(none selected)"
+  }
+}

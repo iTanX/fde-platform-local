@@ -1,0 +1,47 @@
+{
+  "name": "@local/dsh-workbench-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web 工作台：以 DSH 插件形式提供侧栏入口、工作台整页面板与节点页会话嵌入。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "locale",
+    "icon.svg",
+    "skills",
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "tsconfig.host.json",
+    "tsconfig.client.json",
+    "tsdown.config.ts",
+    "scripts/build.sh"
+  ],
+  "scripts": {
+    "build": "bash scripts/build.sh"
+  },
+  "license": "UNLICENSED"
+}
