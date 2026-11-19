@@ -505,6 +505,74 @@ class NodeApiTest {
                 .andExpect(jsonPath("$.code").value(10001));
     }
 
+    /**
+     * 内部接口 {@code GET /internal/requirements/{rid}/nodes}：正常返回的结果。
+     * <p>
+     * 插件靠它实现"不传 nodeInstanceId 时定位当前节点"，因此必须断言三件事：
+     * 节点数与顺序正确、{@code currentSeq} 与某个 {@code status=current} 的节点对得上、
+     * 推进后当前节点随之后移（否则插件仍会定位到旧节点）。
+     */
+    @Test
+    void internalRequirementNodes_returnsBriefsAndTracksCurrentNode() throws Exception {
+        Fixture fixture = prepare("rn", true);
+
+        // 1) 新建需求：3 个节点，节点 1 是 current，其余 waiting
+        JsonNode first = readData(mockMvc.perform(get("/internal/requirements/" + fixture.requirementId + "/nodes")
+                        .header("X-Internal-Token", INTERNAL_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn());
+        assertEquals(fixture.requirementId, first.path("requirementId").asLong());
+        assertEquals("in_progress", first.path("requirementStatus").asText());
+        assertEquals("T51 需求-" + SUFFIX + "-rn", first.path("requirementTitle").asText());
+        assertEquals(1, first.path("currentSeq").asInt());
+        assertEquals(3, first.path("nodes").size());
+        JsonNode nodes = first.path("nodes");
+        // 摘要必须按 seq 升序（插件"取最后一个完成节点"依赖这个顺序）
+        for (int i = 0; i < 3; i += 1) {
+            assertEquals(i + 1, nodes.get(i).path("seq").asInt());
+            assertEquals(fixture.nodes.get(i).id(), nodes.get(i).path("nodeInstanceId").asLong());
+        }
+        assertEquals("需求澄清", nodes.get(0).path("name").asText());
+        assertEquals("current", nodes.get(0).path("status").asText());
+        assertEquals("waiting", nodes.get(1).path("status").asText());
+        assertEquals("waiting", nodes.get(2).path("status").asText());
+        // 只返回摘要：不能把快照大字段带出来
+        assertEquals(List.of("nodeInstanceId", "seq", "name", "status"), fieldNames(nodes.get(0)));
+
+        // 2) 推进节点 1 → 节点 2 变成 current，currentSeq 前进 1
+        completeNode1(fixture);
+        JsonNode second = readData(mockMvc.perform(get("/internal/requirements/" + fixture.requirementId + "/nodes")
+                        .header("X-Internal-Token", INTERNAL_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn());
+        assertEquals(2, second.path("currentSeq").asInt());
+        assertEquals("done", second.path("nodes").get(0).path("status").asText());
+        assertEquals("current", second.path("nodes").get(1).path("status").asText());
+        assertEquals("waiting", second.path("nodes").get(2).path("status").asText());
+    }
+
+    /**
+     * 内部接口 {@code GET /internal/requirements/{rid}/nodes}：需求不存在 → 404/10301。
+     * <p>
+     * 不能返回"空节点列表"了事：插件会把它当成"需求下没有节点"，而真实原因是需求 ID 已失效
+     * （例如库被复位过），两种情况给模型的提示完全不同。
+     */
+    @Test
+    void internalRequirementNodes_returns404WhenRequirementMissing() throws Exception {
+        mockMvc.perform(get("/internal/requirements/99999999/nodes")
+                        .header("X-Internal-Token", INTERNAL_TOKEN))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(10301))
+                .andExpect(jsonPath("$.message").value(containsString("需求不存在")));
+        // 错误的内部令牌同样被拦在设计好的 401 上（与其它 /internal/** 一致）
+        mockMvc.perform(get("/internal/requirements/1/nodes")
+                        .header("X-Internal-Token", "wrong-token"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(10103));
+    }
+
     // ==================================================================
     // 用例 6：会话登记与默认会话解析
     // ==================================================================
@@ -1090,6 +1158,18 @@ class NodeApiTest {
         List<Long> result = new ArrayList<>();
         array.forEach(item -> result.add(item.asLong()));
         return result;
+    }
+
+    /**
+     * JSON 对象的字段名（按出现顺序），用于断言"接口只返回约定的那几个字段"。
+     *
+     * @param object 对象节点
+     * @return 字段名列表
+     */
+    private static List<String> fieldNames(JsonNode object) {
+        List<String> names = new ArrayList<>();
+        object.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     private static String node(Long nodeId, String name, String description, String inputType,

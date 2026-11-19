@@ -5,10 +5,13 @@ import com.fde.workbench.api.dto.NodeReferenceRequest;
 import com.fde.workbench.api.dto.OutputCommitRequest;
 import com.fde.workbench.api.vo.NodeContextVO;
 import com.fde.workbench.api.vo.OutputCommitVO;
+import com.fde.workbench.api.vo.RequirementNodesVO;
 import com.fde.workbench.api.vo.SessionVO;
 import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.common.result.ApiResult;
+import com.fde.workbench.dao.entity.Requirement;
+import com.fde.workbench.dao.mapper.RequirementMapper;
 import com.fde.workbench.service.NodeAdvanceService;
 import com.fde.workbench.service.NodeWorkflowService;
 import com.fde.workbench.service.SessionService;
@@ -26,9 +29,11 @@ import org.springframework.web.bind.annotation.RestController;
  * 内部接口（docs/api.md §11）：只给插件 Host 调用，鉴权由 {@code InternalAuthFilter} 完成
  * （{@code X-Internal-Token} + 仅 127.0.0.1），因此本类<b>不</b>读取登录用户、也<b>不</b>校验 JWT。
  * <p>
- * 四个接口：
+ * 五个接口：
  * <ul>
  *   <li>{@code GET  /internal/nodes/{nid}/context}：{@code node_context_get} 取节点快照；</li>
+ *   <li>{@code GET  /internal/requirements/{rid}/nodes}：按需求列出节点实例摘要，
+ *       让插件在不传 {@code nodeInstanceId} 时直接定位"当前节点"（替代逐个探测节点 ID 的临时做法）；</li>
  *   <li>{@code POST /internal/nodes/{nid}/outputs/{itemKey}/commit}：登记产出并推进；</li>
  *   <li>{@code POST /internal/sessions}：插件新建会话后登记；</li>
  *   <li>{@code POST /internal/nodes/{nid}/reference}：记录模型读取了某引用文件。</li>
@@ -44,12 +49,46 @@ public class InternalController {
 
     private final SessionService sessionService;
 
+    /**
+     * 需求与节点实例 Mapper：节点清单接口直接用现成的两条查询，
+     * 不为一个只读的摘要拼装再新增 Service / Mapper（查询本身就是一次主键查 + 一次按需求查）。
+     */
+    private final RequirementMapper requirementMapper;
+
     public InternalController(NodeWorkflowService nodeWorkflowService,
                               NodeAdvanceService nodeAdvanceService,
-                              SessionService sessionService) {
+                              SessionService sessionService,
+                              RequirementMapper requirementMapper) {
         this.nodeWorkflowService = nodeWorkflowService;
         this.nodeAdvanceService = nodeAdvanceService;
         this.sessionService = sessionService;
+        this.requirementMapper = requirementMapper;
+    }
+
+    /**
+     * GET /internal/requirements/{requirementId}/nodes —— 需求下全部节点实例的定位摘要。
+     * <p>
+     * 供插件在 {@code node_context_get} 未带 {@code nodeInstanceId} 时使用：会话 cwd 形如
+     * {@code <storageRoot>/ws/<requirementId>}，插件从中拿到需求 ID，调本接口一次即可选出当前节点
+     * （{@code status=current}；需求已完成时取最后一个 {@code done} 节点做只读查看），
+     * 不再需要按节点实例 ID 逐个试探 {@code /context}。
+     * <p>
+     * 只返回摘要（id / seq / name / status），完整快照仍由 {@code /internal/nodes/{nid}/context} 提供。
+     *
+     * @param requirementId 需求 ID
+     * @return 需求基本信息（标题、状态、currentSeq）与按 {@code seq} 升序的节点摘要
+     * @throws BizException 需求不存在时 404/10301
+     */
+    @GetMapping(value = "/internal/requirements/{requirementId}/nodes",
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ApiResult<RequirementNodesVO> requirementNodes(@PathVariable Long requirementId) {
+        // 与其它接口同口径：查不到就是 404/10301，不用"空节点列表"掩盖"需求不存在"
+        Requirement requirement = requirementId == null ? null : requirementMapper.selectById(requirementId);
+        if (requirement == null) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "需求不存在");
+        }
+        return ApiResult.ok(RequirementNodesVO.of(requirement,
+                requirementMapper.selectNodesByRequirement(requirementId)));
     }
 
     /**
