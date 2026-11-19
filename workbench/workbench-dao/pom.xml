@@ -24,6 +24,14 @@
             <groupId>org.mybatis.spring.boot</groupId>
             <artifactId>mybatis-spring-boot-starter</artifactId>
         </dependency>
+        <!--
+          Jackson databind：技能版本的 files_json 需要"结构化 JSON ↔ 文件清单对象"互转（T2-1）。
+          MyBatis 启动器已传递引入，这里显式声明，避免以后升级时依赖树变化导致编译失败。
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
         <!-- MySQL 5.7 / 8.0 驱动 -->
         <dependency>
             <groupId>com.mysql</groupId>

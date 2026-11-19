@@ -3,6 +3,8 @@ package com.fde.workbench.api.handler;
 import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.common.result.ApiResult;
+import com.fde.workbench.service.SkillReferencedException;
+import com.fde.workbench.service.vo.SkillReferencesVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -14,6 +16,8 @@ import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
@@ -35,6 +39,20 @@ public class GlobalExceptionHandler {
         log.warn("业务异常：code={}, message={}", errorCode.getCode(), ex.resolveMessage());
         return ResponseEntity.status(errorCode.getHttpStatus())
                 .body(ApiResult.fail(errorCode, ex.resolveMessage()));
+    }
+
+    /**
+     * 删除技能被引用 → 409/10403，并把引用清单写进 {@code data}（docs/api.md §5）。
+     * <p>
+     * 必须单独声明：方法参数比 {@link #handleBizException} 更具体，Spring 会优先匹配这里；
+     * 否则 data 恒为 null，前端就拿不到"被哪个需求的哪个节点引用"。
+     */
+    @ExceptionHandler(SkillReferencedException.class)
+    public ResponseEntity<ApiResult<SkillReferencesVO>> handleSkillReferenced(SkillReferencedException ex) {
+        ErrorCode errorCode = ex.getErrorCode();
+        log.warn("删除技能被引用拒绝：引用数={}", ex.getReferences().references().size());
+        return ResponseEntity.status(errorCode.getHttpStatus())
+                .body(new ApiResult<>(errorCode.getCode(), ex.resolveMessage(), ex.getReferences()));
     }
 
     /**
@@ -77,6 +95,30 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResult<Void>> handleUnreadable(HttpMessageNotReadableException ex) {
         log.warn("请求体解析失败：{}", ex.getMessage());
         return badRequest("请求体格式不正确，需为合法 JSON");
+    }
+
+    /**
+     * multipart 缺少 {@code file} 字段 → 400 / 10001。
+     * <p>
+     * 这是 Servlet 的请求解析异常，不属于 {@code MethodArgumentNotValidException}，
+     * 不单独处理会被兜底成 500，前端就无法区分"没选文件"与"服务出错"。
+     */
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ResponseEntity<ApiResult<Void>> handleMissingPart(MissingServletRequestPartException ex) {
+        return badRequest("缺少上传文件字段：" + ex.getRequestPartName());
+    }
+
+    /**
+     * 上传文件超过容器上限 → 413 / 10501（api.md §1.3）。
+     * <p>
+     * 容器层的 {@code spring.servlet.multipart.max-request-size} 会在进入 Controller 前抛出本异常；
+     * 技能包解包后的单文件 / 总量限制在 {@code SkillPackageExtractor} 里同样是 10501。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiResult<Void>> handleMaxUpload(MaxUploadSizeExceededException ex) {
+        log.warn("上传文件超过容器上限：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .body(ApiResult.fail(ErrorCode.FILE_TOO_LARGE, "上传文件超出大小限制"));
     }
 
     /**

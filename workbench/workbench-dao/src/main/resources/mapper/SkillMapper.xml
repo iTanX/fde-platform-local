@@ -2,15 +2,62 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <!--
-  技能表 wb_skill / 技能版本表 wb_skill_version 的 SQL（T1-2 只包含"移除成员时清理技能"所需语句）。
+  技能表 wb_skill / 技能版本表 wb_skill_version 的 SQL。
+
+  T1-2：移除成员时清理技能（countByProjectAndCreator / deleteVersionsByProjectAndCreator / deleteByProjectAndCreator）。
+  T2-1：技能管理（列表、按名查、插入、逻辑删除、版本追加与查询、删除前引用校验）。两个任务共用同一个 Mapper。
 
   外键关系（docs/database/001_init.sql §10，全部 RESTRICT）：
     wb_skill_version.skill_id      → wb_skill.id            （fk_skill_version_skill）
     wb_workflow_node_skill.skill_id → wb_skill.id           （fk_node_skill_skill）
   因此删除顺序必须是：版本 → 技能；若技能仍被流程节点引用，删除会抛外键错误，
   由 ProjectMemberService 捕获后整体回滚并返回可读提示。
+
+  注意：T2-1 的"删除技能"是**逻辑删除**（deleted=1），不触发上述外键；
+  引用校验由 selectUnfinishedReferences 在 Service 中显式完成（口径见该语句注释）。
 -->
 <mapper namespace="com.fde.workbench.dao.mapper.SkillMapper">
+
+    <!-- 技能字段映射（基类 Skill） -->
+    <resultMap id="BaseMap" type="com.fde.workbench.dao.entity.Skill">
+        <id property="id" column="id"/>
+        <result property="projectId" column="project_id"/>
+        <result property="name" column="name"/>
+        <result property="description" column="description"/>
+        <result property="currentVersionId" column="current_version_id"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="deleted" column="deleted"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 技能 + 统计列：当前版本号、流程节点引用数（extends 复用基类映射） -->
+    <resultMap id="SkillWithStatsMap" extends="BaseMap" type="com.fde.workbench.dao.entity.SkillWithStats">
+        <result property="currentVersionNo" column="current_version_no"/>
+        <result property="usageCount" column="usage_count"/>
+    </resultMap>
+
+    <resultMap id="VersionMap" type="com.fde.workbench.dao.entity.SkillVersion">
+        <id property="id" column="id"/>
+        <result property="skillId" column="skill_id"/>
+        <result property="versionNo" column="version_no"/>
+        <result property="filesJson" column="files_json"/>
+        <result property="checksum" column="checksum"/>
+        <result property="entryPath" column="entry_path"/>
+        <result property="uploadedBy" column="uploaded_by"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <resultMap id="ReferenceMap" type="com.fde.workbench.dao.entity.SkillReference">
+        <result property="requirementId" column="requirement_id"/>
+        <result property="requirementTitle" column="requirement_title"/>
+        <result property="nodeName" column="node_name"/>
+    </resultMap>
+
+    <!-- 版本表全字段（含 JSON 列，按字符串取回，解析放在 Service） -->
+    <sql id="VersionColumns">
+        v.id, v.skill_id, v.version_no, v.files_json, v.checksum, v.entry_path, v.uploaded_by, v.created_at
+    </sql>
 
     <select id="countByProjectAndCreator" resultType="long">
         SELECT COUNT(*)
@@ -33,5 +80,128 @@
          WHERE project_id = #{projectId}
            AND created_by = #{createdBy}
     </delete>
+
+    <!--
+      技能列表：当前版本号走 LEFT JOIN（技能刚建、版本尚未回填时 current_version_id 为 NULL，仍要出现在列表里）；
+      引用数用相关子查询统计流程节点引用次数（SkillVO.usageCount），只统计模板引用，不含需求实例快照。
+    -->
+    <select id="selectByProject" resultMap="SkillWithStatsMap">
+        SELECT s.id, s.project_id, s.name, s.description, s.current_version_id, s.created_by, s.deleted,
+               s.created_at, s.updated_at,
+               v.version_no AS current_version_no,
+               (SELECT COUNT(*) FROM wb_workflow_node_skill ns WHERE ns.skill_id = s.id) AS usage_count
+          FROM wb_skill s
+          LEFT JOIN wb_skill_version v ON v.id = s.current_version_id
+         WHERE s.project_id = #{projectId}
+           AND s.deleted = 0
+         ORDER BY s.created_at DESC, s.id DESC
+    </select>
+
+    <select id="selectById" resultMap="BaseMap">
+        SELECT id, project_id, name, description, current_version_id, created_by, deleted, created_at, updated_at
+          FROM wb_skill
+         WHERE id = #{id}
+           AND deleted = 0
+    </select>
+
+    <select id="selectByProjectAndName" resultMap="BaseMap">
+        SELECT id, project_id, name, description, current_version_id, created_by, deleted, created_at, updated_at
+          FROM wb_skill
+         WHERE project_id = #{projectId}
+           AND name = #{name}
+           AND deleted = 0
+         LIMIT 1
+    </select>
+
+    <insert id="insert" parameterType="com.fde.workbench.dao.entity.Skill"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_skill (project_id, name, description, current_version_id, created_by, deleted,
+                              created_at, updated_at)
+        VALUES (#{projectId}, #{name}, #{description}, #{currentVersionId}, #{createdBy}, 0,
+                #{createdAt}, #{updatedAt})
+    </insert>
+
+    <update id="updateCurrentVersion">
+        UPDATE wb_skill
+           SET current_version_id = #{currentVersionId},
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+    </update>
+
+    <update id="markDeleted">
+        UPDATE wb_skill
+           SET deleted = 1,
+               updated_at = #{updatedAt}
+         WHERE id = #{id}
+           AND project_id = #{projectId}
+           AND deleted = 0
+    </update>
+
+    <select id="countNodeReferences" resultType="long">
+        SELECT COUNT(*)
+          FROM wb_workflow_node_skill
+         WHERE skill_id = #{skillId}
+    </select>
+
+    <select id="selectMaxVersionNo" resultType="java.lang.Integer">
+        SELECT MAX(version_no)
+          FROM wb_skill_version
+         WHERE skill_id = #{skillId}
+    </select>
+
+    <insert id="insertVersion" parameterType="com.fde.workbench.dao.entity.SkillVersion"
+            useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO wb_skill_version (skill_id, version_no, files_json, checksum, entry_path, uploaded_by, created_at)
+        VALUES (#{skillId}, #{versionNo}, #{filesJson}, #{checksum}, #{entryPath}, #{uploadedBy}, #{createdAt})
+    </insert>
+
+    <select id="selectVersion" resultMap="VersionMap">
+        SELECT <include refid="VersionColumns"/>
+          FROM wb_skill_version v
+         WHERE v.skill_id = #{skillId}
+           AND v.version_no = #{versionNo}
+    </select>
+
+    <select id="selectVersionById" resultMap="VersionMap">
+        SELECT <include refid="VersionColumns"/>
+          FROM wb_skill_version v
+         WHERE v.id = #{id}
+    </select>
+
+    <select id="selectVersions" resultMap="VersionMap">
+        SELECT <include refid="VersionColumns"/>
+          FROM wb_skill_version v
+         WHERE v.skill_id = #{skillId}
+         ORDER BY v.version_no ASC
+    </select>
+
+    <!--
+      删除技能前的引用校验（docs/api.md §5 DELETE）。
+
+      判定口径有三层，缺一不可：
+        ① wb_workflow_node_skill 存在该技能的模板引用（先过一层，避免全表扫描快照）；
+        ② 该流程节点在某个需求里生成了节点实例（node.workflow_node_id = ns.node_id）；
+        ③ 节点实例的 skills_snapshot 中确实含有该技能，且所属需求 status != 'completed'。
+
+      为什么 ③ 还要判 skills_snapshot：需求创建时对技能做了版本快照（PRD 快照原则），
+      之后流程改配置、把节点上的技能换成别的，已有需求的快照仍然指向原技能；
+      只按模板表判断会漏掉这些"实例仍在用"的引用。
+      为什么排除 completed：已完成需求的输出已落库（PRD AC-D2.2），技能删除不影响历史结果，
+      这类引用不应阻止删除。
+
+      skills_snapshot 结构：[{"skillId":1,"name":"..","versionId":2,"versionNo":1}]；
+      用 JSON_CONTAINS 判断数组内是否存在指定 skillId 的对象，版本 5.7.44 支持。
+      同一需求可能有多条实例引用，用 DISTINCT 去重（前端引用清单不需要重复行）。
+    -->
+    <select id="selectUnfinishedReferences" resultMap="ReferenceMap">
+        SELECT DISTINCT r.id AS requirement_id, r.title AS requirement_title, n.name AS node_name
+          FROM wb_workflow_node_skill ns
+          JOIN wb_requirement_node n ON n.workflow_node_id = ns.node_id
+          JOIN wb_requirement r ON r.id = n.requirement_id
+         WHERE ns.skill_id = #{skillId}
+           AND JSON_CONTAINS(n.skills_snapshot, JSON_OBJECT('skillId', #{skillId}))
+           AND r.status &lt;&gt; 'completed'
+         ORDER BY r.id, n.name
+    </select>
 
 </mapper>
