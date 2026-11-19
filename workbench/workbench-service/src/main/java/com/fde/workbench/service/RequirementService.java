@@ -204,14 +204,14 @@ public class RequirementService {
      * 另一个需求占用（自增 ID 复用导致），抛异常回滚并重试，绝不让两个需求共用一个 workspace。
      * <p>
      * 校验（只读，放在事务外）：项目存在 → 我是成员 → 标题/说明合法 → 流程属于本项目且未删除
-     * → 流程至少有 1 个节点。技能快照同样在事务外一次取全，避免长事务里逐条查库。
+     * → 流程至少有 1 个节点。技能快照在事务外一次取全，在写入事务内批量锁定并确认技能仍可用。
      *
      * @param projectId  项目 ID
      * @param title      标题（1–200 字符）
      * @param description 说明，可空
      * @param workflowId 流程 ID（必填）
      * @return 需求详情（与 GET 详情结构一致）
-     * @throws BizException 404/10301、403/10201、400/10001
+     * @throws BizException 404/10301、403/10201、400/10001、409/10402（准备快照期间技能已删除）
      */
     public RequirementDetailVO create(Long projectId, String title, String description, Long workflowId) {
         CurrentUser user = currentUserContext.require();
@@ -286,6 +286,12 @@ public class RequirementService {
      */
     private Long createOnce(Long projectId, Long workflowId, String title, String description,
                             Long creatorId, List<PreparedNode> preparedNodes) {
+        // 对快照引用的技能持有共享锁直至提交，避免落库前被并发删除。
+        List<Long> skillIds = preparedNodes.stream().flatMap(node -> node.skills().stream())
+                .map(NodeSnapshots.SkillItem::skillId).distinct().sorted().toList();
+        if (!skillIds.isEmpty() && skillMapper.lockActiveSkillsForReference(projectId, skillIds).size() != skillIds.size()) {
+            throw BizException.of(ErrorCode.REVISION_CONFLICT, "流程节点引用的技能已删除或不可用，请刷新后重试");
+        }
         LocalDateTime now = now();
 
         // ① 插入需求行：workspace 路径先占位（列 NOT NULL，而路径要等自增 ID）
@@ -328,7 +334,7 @@ public class RequirementService {
             node.setInputType(prepared.inputType());
             node.setInputsSnapshot(prepared.inputsJson());
             node.setOutputsSnapshot(prepared.outputsJson());
-            node.setSkillsSnapshot(prepared.skillsJson());
+            node.setSkillsSnapshot(toJson(prepared.skills()));
             // ④ 第一个节点即当前节点（current_seq=1），写 started_at；其余 waiting
             if (prepared.seq() == 1) {
                 node.setStatus(RequirementNode.STATUS_CURRENT);
@@ -468,16 +474,19 @@ public class RequirementService {
      * @throws BizException 404/10301、403/10201、403/10202、400/10001、409/10402
      */
     public void delete(Long requirementId, RevisionStamp revision) {
-        RequirementWithStats requirement = requireOperableRequirement(requirementId);
+        requireOperableRequirement(requirementId);
         int expected = requireRevision(revision);
 
-        // 事务前先记下磁盘路径：事务里删完就查不到了（只读操作，失败无副作用）
-        List<String> filePaths = fileMapper.selectByRequirement(requirementId).stream()
-                .map(FileRecord::getStorageRelPath)
-                .filter(path -> path != null && !path.isBlank())
-                .toList();
-
-        int[] removed = transactionTemplate.execute(status -> {
+        List<String> filePaths = transactionTemplate.execute(status -> {
+            // 与节点登记共用同一把锁，收集所有即将被删除的文件，再清理外键引用。
+            Requirement locked = requirementMapper.selectByIdForUpdate(requirementId);
+            if (locked == null || locked.getRevision() != expected) {
+                throw revisionConflict(requirementId, expected);
+            }
+            List<String> paths = fileMapper.selectByRequirement(requirementId).stream()
+                    .map(FileRecord::getStorageRelPath)
+                    .filter(path -> path != null && !path.isBlank())
+                    .toList();
             // 顺序见方法注释：先解除跨表引用，再删节点与文件，最后删需求行（revision 闸门）
             requirementMapper.clearPrimarySessionByRequirement(requirementId);
             requirementMapper.deleteSessionRuntimeInfoByRequirement(requirementId);
@@ -494,10 +503,9 @@ public class RequirementService {
                 // 走到这里说明 revision 在本次请求期间被别人改过：抛异常 → 上面所有删除回滚
                 throw revisionConflict(requirementId, expected);
             }
-            return new int[]{deleted, fileCount};
+            log.info("删除需求（物理删除）：requirementId={}, 需求行={}, 文件登记={}", requirementId, deleted, fileCount);
+            return paths;
         });
-        log.info("删除需求（物理删除）：requirementId={}, 需求行={}, 文件登记={}", requirementId,
-                removed == null ? 0 : removed[0], removed == null ? 0 : removed[1]);
 
         // 事务已提交：再删磁盘文件（失败只记日志，不影响删除结果）
         filePaths.forEach(this::deleteStoredFileQuietly);
@@ -550,10 +558,9 @@ public class RequirementService {
     }
 
     /**
-     * 把流程节点展开成"待写入的节点实例"（含三个 JSON 快照串）。
+     * 把流程节点展开成待写入的节点实例快照。
      * <p>
-     * 数据来源全部是流程模板的<b>当场读取</b>，一次 LEFT JOIN 取回节点 + 输入项 + 输出项，
-     * 再单独取一次"节点技能 + 技能当前版本"。两者都在事务外完成，事务里只做纯写入。
+     * 事务外先用一次 LEFT JOIN 取回节点、输入项和输出项，再单独读取节点技能与当前版本。
      *
      * @param workflowId 流程 ID
      * @return 按 seq 升序的节点快照
@@ -591,7 +598,7 @@ public class RequirementService {
             NodeSnapshots.NodeSnapshot snapshot = new NodeSnapshots.NodeSnapshot(inputs,
                     List.copyOf(acc.outputs.values()), List.copyOf(skills));
             prepared.add(new PreparedNode(acc.nodeId, acc.seq, acc.name, acc.description, acc.inputType,
-                    toJson(snapshot.inputs()), toJson(snapshot.outputs()), toJson(snapshot.skills())));
+                    toJson(snapshot.inputs()), toJson(snapshot.outputs()), snapshot.skills()));
         }
         return prepared;
     }
@@ -818,7 +825,7 @@ public class RequirementService {
     }
 
     /**
-     * 事务内待写入的节点快照（JSON 已序列化）。
+     * 待写入的节点快照。技能保留结构化数据，供写入事务锁定技能后序列化。
      *
      * @param workflowNodeId 来源流程节点 ID
      * @param seq            执行顺序（= 流程节点 seq）
@@ -827,10 +834,11 @@ public class RequirementService {
      * @param inputType      快照输入类型
      * @param inputsJson     输入项快照 JSON
      * @param outputsJson    输出项快照 JSON
-     * @param skillsJson     技能快照 JSON
+     * @param skills         技能快照
      */
     private record PreparedNode(Long workflowNodeId, Integer seq, String name, String description,
-                                String inputType, String inputsJson, String outputsJson, String skillsJson) {
+                                String inputType, String inputsJson, String outputsJson,
+                                List<NodeSnapshots.SkillItem> skills) {
     }
 
     /**

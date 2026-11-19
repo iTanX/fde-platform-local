@@ -98,7 +98,7 @@ public interface SkillMapper {
                     @Param("updatedAt") LocalDateTime updatedAt);
 
     /**
-     * 统计技能被流程节点引用的次数（{@code wb_workflow_node_skill}），对应 SkillVO.usageCount。
+     * 统计技能被活跃流程节点引用的次数，对应 SkillVO.usageCount。
      *
      * @param skillId 技能 ID
      * @return 引用数
@@ -155,16 +155,19 @@ public interface SkillMapper {
     // ------------------------------------------------------------------
 
     /**
-     * 查询仍引用该技能的"未完成需求"节点实例（删除技能前必须为空）。
-     * <p>
-     * 判定口径（docs/api.md §5）：节点实例的 {@code skills_snapshot} 中包含该技能
-     * <b>且</b> 所属需求 {@code status != 'completed'}。
-     * 已完成的需求不受影响（PRD AC-D2.2），因此不阻止删除。
+     * 查询活跃流程模板与未完成需求节点快照中对该技能的引用（docs/api.md §5）。
      *
      * @param skillId 技能 ID
-     * @return 引用清单（需求 + 节点名），按需求与节点顺序排列
+     * @return 引用清单，包含来源和节点名称
      */
-    List<SkillReference> selectUnfinishedReferences(@Param("skillId") Long skillId);
+    List<SkillReference> selectBlockingReferences(@Param("skillId") Long skillId);
+
+    /** 锁定待删除的活跃技能，必须在删除事务内执行。 */
+    Long lockActiveSkillForDelete(@Param("skillId") Long skillId, @Param("projectId") Long projectId);
+
+    /** 在引用写入事务内共享锁定并返回仍可用的技能 ID；skillIds 必须非空。 */
+    List<Long> lockActiveSkillsForReference(@Param("projectId") Long projectId,
+                                            @Param("skillIds") List<Long> skillIds);
 
     /**
      * 统计某用户在某项目内创建的技能数（含已逻辑删除的）。

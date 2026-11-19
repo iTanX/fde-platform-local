@@ -7,6 +7,7 @@ import com.fde.workbench.api.vo.NodeContextVO;
 import com.fde.workbench.api.vo.OutputCommitVO;
 import com.fde.workbench.api.vo.RequirementNodesVO;
 import com.fde.workbench.api.vo.SessionVO;
+import com.fde.workbench.api.vo.SkillFileVO;
 import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.common.result.ApiResult;
@@ -104,6 +105,17 @@ public class InternalController {
                                                     @RequestParam(value = "operator", required = false)
                                                     String operator) {
         return ApiResult.ok(NodeContextVO.Context.of(nodeWorkflowService.context(nodeInstanceId, operator)));
+    }
+
+    /** 读取当前节点技能快照中指定位置的 SKILL.md，版本必须与快照一致。 */
+    @GetMapping(value = "/internal/requirements/{requirementId}/nodes/{nodeInstanceId}/skills/{position}",
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ApiResult<SkillFileVO> currentSkillEntry(@PathVariable Long requirementId,
+                                                   @PathVariable Long nodeInstanceId,
+                                                   @PathVariable int position,
+                                                   @RequestParam int versionNo) {
+        return ApiResult.ok(SkillFileVO.of(
+                nodeWorkflowService.currentSkillEntry(requirementId, nodeInstanceId, position, versionNo)));
     }
 
     /**

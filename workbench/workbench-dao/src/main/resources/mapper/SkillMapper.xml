@@ -14,7 +14,7 @@
   由 ProjectMemberService 捕获后整体回滚并返回可读提示。
 
   注意：T2-1 的"删除技能"是**逻辑删除**（deleted=1），不触发上述外键；
-  引用校验由 selectUnfinishedReferences 在 Service 中显式完成（口径见该语句注释）。
+  引用校验由 selectBlockingReferences 在 Service 中显式完成。
 -->
 <mapper namespace="com.fde.workbench.dao.mapper.SkillMapper">
 
@@ -49,6 +49,9 @@
     </resultMap>
 
     <resultMap id="ReferenceMap" type="com.fde.workbench.dao.entity.SkillReference">
+        <result property="kind" column="kind"/>
+        <result property="workflowId" column="workflow_id"/>
+        <result property="workflowName" column="workflow_name"/>
         <result property="requirementId" column="requirement_id"/>
         <result property="requirementTitle" column="requirement_title"/>
         <result property="nodeName" column="node_name"/>
@@ -81,6 +84,14 @@
            AND created_by = #{createdBy}
     </delete>
 
+    <!-- deleted 属于流程表；节点表与技能关联表都没有此列。 -->
+    <sql id="ActiveWorkflowSkillLinks">
+          FROM wb_workflow_node_skill ns
+          JOIN wb_workflow_node n ON n.id = ns.node_id
+          JOIN wb_workflow w ON w.id = n.workflow_id
+         WHERE w.deleted = 0
+    </sql>
+
     <!--
       技能列表：当前版本号走 LEFT JOIN（技能刚建、版本尚未回填时 current_version_id 为 NULL，仍要出现在列表里）；
       引用数用相关子查询统计流程节点引用次数（SkillVO.usageCount），只统计模板引用，不含需求实例快照。
@@ -89,7 +100,7 @@
         SELECT s.id, s.project_id, s.name, s.description, s.current_version_id, s.created_by, s.deleted,
                s.created_at, s.updated_at,
                v.version_no AS current_version_no,
-               (SELECT COUNT(*) FROM wb_workflow_node_skill ns WHERE ns.skill_id = s.id) AS usage_count
+               (SELECT COUNT(*) <include refid="ActiveWorkflowSkillLinks"/> AND ns.skill_id = s.id) AS usage_count
           FROM wb_skill s
           LEFT JOIN wb_skill_version v ON v.id = s.current_version_id
          WHERE s.project_id = #{projectId}
@@ -154,8 +165,8 @@
 
     <select id="countNodeReferences" resultType="long">
         SELECT COUNT(*)
-          FROM wb_workflow_node_skill
-         WHERE skill_id = #{skillId}
+        <include refid="ActiveWorkflowSkillLinks"/>
+           AND ns.skill_id = #{skillId}
     </select>
 
     <select id="selectMaxVersionNo" resultType="java.lang.Integer">
@@ -190,33 +201,46 @@
          ORDER BY v.version_no ASC
     </select>
 
+    <!-- 技能删除与两类引用写入使用同一批技能行的互斥锁和共享锁。 -->
+    <select id="lockActiveSkillForDelete" resultType="java.lang.Long">
+        SELECT id
+          FROM wb_skill
+         WHERE id = #{skillId}
+           AND project_id = #{projectId}
+           AND deleted = 0
+           FOR UPDATE
+    </select>
+
+    <!-- 按主键锁定所需技能，避免用项目索引扫描并锁住该项目的其他技能。 -->
+    <select id="lockActiveSkillsForReference" resultType="java.lang.Long">
+        SELECT id
+          FROM wb_skill FORCE INDEX (PRIMARY)
+         WHERE project_id = #{projectId}
+           AND deleted = 0
+           AND id IN
+        <foreach collection="skillIds" item="skillId" open="(" separator="," close=")">
+            #{skillId}
+        </foreach>
+         ORDER BY id
+          LOCK IN SHARE MODE
+    </select>
+
     <!--
-      删除技能前的引用校验（docs/api.md §5 DELETE）。
-
-      判定口径有三层，缺一不可：
-        ① wb_workflow_node_skill 存在该技能的模板引用（先过一层，避免全表扫描快照）；
-        ② 该流程节点在某个需求里生成了节点实例（node.workflow_node_id = ns.node_id）；
-        ③ 节点实例的 skills_snapshot 中确实含有该技能，且所属需求 status != 'completed'。
-
-      为什么 ③ 还要判 skills_snapshot：需求创建时对技能做了版本快照（PRD 快照原则），
-      之后流程改配置、把节点上的技能换成别的，已有需求的快照仍然指向原技能；
-      只按模板表判断会漏掉这些"实例仍在用"的引用。
-      为什么排除 completed：已完成需求的输出已落库（PRD AC-D2.2），技能删除不影响历史结果，
-      这类引用不应阻止删除。
-
-      skills_snapshot 结构：[{"skillId":1,"name":"..","versionId":2,"versionNo":1}]；
-      用 JSON_CONTAINS 判断数组内是否存在指定 skillId 的对象，版本 5.7.44 支持。
-      同一需求可能有多条实例引用，用 DISTINCT 去重（前端引用清单不需要重复行）。
+      模板与快照分别检查。流程节点修改后，已有快照仍可能引用原技能。
+      MySQL 5.7.44 的 JSON_CONTAINS 可匹配数组中含指定数字 skillId 的对象。
     -->
-    <select id="selectUnfinishedReferences" resultMap="ReferenceMap">
-        SELECT DISTINCT r.id AS requirement_id, r.title AS requirement_title, n.name AS node_name
-          FROM wb_workflow_node_skill ns
-          JOIN wb_requirement_node n ON n.workflow_node_id = ns.node_id
-          JOIN wb_requirement r ON r.id = n.requirement_id
-         WHERE ns.skill_id = #{skillId}
-           AND JSON_CONTAINS(n.skills_snapshot, JSON_OBJECT('skillId', #{skillId}))
-           AND r.status &lt;&gt; 'completed'
-         ORDER BY r.id, n.name
+    <select id="selectBlockingReferences" resultMap="ReferenceMap">
+        SELECT 'workflow' AS kind, w.id AS workflow_id, w.name AS workflow_name,
+               NULL AS requirement_id, NULL AS requirement_title, n.name AS node_name
+        <include refid="ActiveWorkflowSkillLinks"/>
+           AND ns.skill_id = #{skillId}
+        UNION ALL
+        SELECT 'requirement', NULL, NULL, r.id, r.title, rn.name
+          FROM wb_requirement_node rn
+          JOIN wb_requirement r ON r.id = rn.requirement_id
+         WHERE r.status &lt;&gt; 'completed'
+           AND JSON_CONTAINS(rn.skills_snapshot, JSON_OBJECT('skillId', #{skillId}))
+         ORDER BY kind DESC, workflow_id, requirement_id, node_name
     </select>
 
 </mapper>

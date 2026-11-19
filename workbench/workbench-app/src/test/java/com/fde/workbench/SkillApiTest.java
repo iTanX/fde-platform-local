@@ -2,7 +2,6 @@ package com.fde.workbench;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fde.workbench.dao.entity.User;
 import com.fde.workbench.dao.mapper.UserMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,11 +26,11 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -274,84 +273,123 @@ class SkillApiTest {
     }
 
     // ------------------------------------------------------------------
-    // 用例 4：被引用删除 409/10403（含引用清单）；未被引用删除成功且列表消失
+    // 用例 4：按引用来源验证删除保护和响应详情
     // ------------------------------------------------------------------
 
     @Test
-    void delete_rejectedWhenReferencedByUnfinishedRequirement_thenSucceedsWhenUnreferenced() throws Exception {
-        String owner = "t21_" + SUFFIX + "_d1";
-        String member = "t21_" + SUFFIX + "_d2";
+    void delete_rejectsActiveWorkflowReferenceWithoutRequirement() throws Exception {
+        String owner = "t21_" + SUFFIX + "_dw";
         String ownerToken = registerAndLogin(owner);
-        String memberToken = registerAndLogin(member);
-        long projectId = createProject(ownerToken, "删除技能-" + SUFFIX);
-        addMemberOk(ownerToken, projectId, member);
+        long projectId = createProject(ownerToken, "模板引用-" + SUFFIX);
+        long skillId = uploadDeletionTestSkill(ownerToken, projectId);
+        long workflowId = insertWorkflow(projectId, userMapper.selectByUsername(owner).getId());
+        long nodeId = insertWorkflowNode(workflowId, 2, "模板节点");
+        linkWorkflowSkill(nodeId, skillId);
 
-        // 构造：流程节点 2 挂技能；未完成需求 R1 的节点实例快照引用该技能；另有已完成需求 R2 也引用（不应阻止删除）
-        long skillId = readData(uploadOk(ownerToken, projectId, "referenced.zip",
-                zipWithRawEntries(new LinkedHashMap<>(Map.of("SKILL.md", "# 被引用\n"))))).path("id").asLong();
-        User ownerUser = userMapper.selectByUsername(owner);
-        long workflowId = insertWorkflow(projectId, ownerUser.getId());
-        long nodeId = insertWorkflowNode(workflowId, 2, "需求拆解");
-        jdbcTemplate.update("INSERT INTO wb_workflow_node_skill (node_id, skill_id, seq) VALUES (?, ?, 1)",
-                nodeId, skillId);
-        long inProgressRequirement = insertRequirement(projectId, workflowId, ownerUser.getId(), "进行中的需求");
-        insertRequirementNode(inProgressRequirement, nodeId, 2, "需求拆解", skillId);
-        long completedRequirement = insertRequirement(projectId, workflowId, ownerUser.getId(), "已完成的需求");
-        jdbcTemplate.update("UPDATE wb_requirement SET status = 'completed' WHERE id = ?", completedRequirement);
-        insertRequirementNode(completedRequirement, nodeId, 2, "需求拆解", skillId);
-
-        // 列表：usageCount 体现流程节点引用数
         mockMvc.perform(get("/api/projects/" + projectId + "/skills")
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(jsonPath("$.data[0].usageCount").value(1));
-
-        // 被未完成需求引用 → 409 / 10403，data.references 给出需求与节点
-        MvcResult rejected = mockMvc.perform(delete("/api/skills/" + skillId)
+        mockMvc.perform(delete("/api/skills/" + skillId)
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value(10403))
                 .andExpect(jsonPath("$.data.references.length()").value(1))
-                .andExpect(jsonPath("$.data.references[0].requirementId").value((int) inProgressRequirement))
-                .andExpect(jsonPath("$.data.references[0].requirementTitle")
-                        .value("进行中的需求-" + SUFFIX))
-                .andExpect(jsonPath("$.data.references[0].nodeName").value("需求拆解"))
-                .andReturn();
-        assertNotNull(rejected.getResponse().getContentAsString());
-        // 被拒绝后数据原样保留
-        assertEquals(0, jdbcTemplate.queryForObject(
-                "SELECT deleted FROM wb_skill WHERE id = ?", Integer.class, skillId));
-        assertEquals(1, countVersions(skillId));
+                .andExpect(jsonPath("$.data.references[0].kind").value("workflow"))
+                .andExpect(jsonPath("$.data.references[0].workflowId").value((int) workflowId))
+                .andExpect(jsonPath("$.data.references[0].workflowName").value("技能引用流程-" + SUFFIX))
+                .andExpect(jsonPath("$.data.references[0].nodeName").value("模板节点"))
+                .andExpect(jsonPath("$.data.references[0].requirementId").doesNotHaveJsonPath());
+        assertSkillDeletionState(skillId, 0);
+    }
 
-        // 需求完成后引用不再阻止删除（PRD AC-D2.2）。技能是 owner 上传的，由 creator 删除（权限 C）
-        jdbcTemplate.update("UPDATE wb_requirement SET status = 'completed' WHERE id = ?", inProgressRequirement);
+    @Test
+    void delete_rejectsUnfinishedSnapshotWithoutWorkflowSkillLink() throws Exception {
+        String owner = "t21_" + SUFFIX + "_dr";
+        String ownerToken = registerAndLogin(owner);
+        long projectId = createProject(ownerToken, "快照引用-" + SUFFIX);
+        long skillId = uploadDeletionTestSkill(ownerToken, projectId);
+        long userId = userMapper.selectByUsername(owner).getId();
+        long workflowId = insertWorkflow(projectId, userId);
+        long nodeId = insertWorkflowNode(workflowId, 2, "当前模板节点");
+        long requirementId = insertRequirement(projectId, workflowId, userId, "进行中的需求");
+        // 模板可在需求生成后改名并移除原技能，快照仍能独立阻止删除。
+        insertRequirementNode(requirementId, nodeId, 2, "历史快照节点", skillId);
+
+        mockMvc.perform(get("/api/projects/" + projectId + "/skills")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(jsonPath("$.data[0].usageCount").value(0));
+        mockMvc.perform(delete("/api/skills/" + skillId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10403))
+                .andExpect(jsonPath("$.data.references.length()").value(1))
+                .andExpect(jsonPath("$.data.references[0].kind").value("requirement"))
+                .andExpect(jsonPath("$.data.references[0].requirementId").value((int) requirementId))
+                .andExpect(jsonPath("$.data.references[0].requirementTitle").value("进行中的需求-" + SUFFIX))
+                .andExpect(jsonPath("$.data.references[0].nodeName").value("历史快照节点"))
+                .andExpect(jsonPath("$.data.references[0].workflowId").doesNotHaveJsonPath());
+        assertSkillDeletionState(skillId, 0);
+    }
+
+    @Test
+    void delete_reportsBothReferencesAndAllowsHistoricalReferences() throws Exception {
+        String owner = "t21_" + SUFFIX + "_dh";
+        String ownerToken = registerAndLogin(owner);
+        long projectId = createProject(ownerToken, "历史引用-" + SUFFIX);
+        long skillId = uploadDeletionTestSkill(ownerToken, projectId);
+        long userId = userMapper.selectByUsername(owner).getId();
+        long workflowId = insertWorkflow(projectId, userId);
+        long nodeId = insertWorkflowNode(workflowId, 2, "需求拆解");
+        linkWorkflowSkill(nodeId, skillId);
+        long requirementId = insertRequirement(projectId, workflowId, userId, "最终完成的需求");
+        insertRequirementNode(requirementId, nodeId, 2, "需求拆解", skillId);
+
+        mockMvc.perform(delete("/api/skills/" + skillId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10403))
+                .andExpect(jsonPath("$.data.references[*].kind", containsInAnyOrder("workflow", "requirement")));
+        assertSkillDeletionState(skillId, 0);
+
+        // 保留两条历史引用，验证完成的需求和已逻辑删除的流程均不会阻止删除。
+        jdbcTemplate.update("UPDATE wb_requirement SET status = 'completed' WHERE id = ?", requirementId);
+        jdbcTemplate.update("UPDATE wb_workflow SET deleted = 1 WHERE id = ?", workflowId);
+        mockMvc.perform(get("/api/projects/" + projectId + "/skills")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(jsonPath("$.data[0].usageCount").value(0));
         mockMvc.perform(delete("/api/skills/" + skillId)
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0));
-        // 逻辑删除：deleted=1，版本行与历史快照保留
-        assertEquals(1, jdbcTemplate.queryForObject(
-                "SELECT deleted FROM wb_skill WHERE id = ?", Integer.class, skillId));
-        assertEquals(1, countVersions(skillId), "逻辑删除必须保留版本行");
-        // 列表消失
+        assertSkillDeletionState(skillId, 1);
+    }
+
+    @Test
+    void delete_unreferencedSkillIsHiddenAndPreservesVersionAndFiles() throws Exception {
+        String owner = "t21_" + SUFFIX + "_do";
+        String member = "t21_" + SUFFIX + "_dm";
+        String ownerToken = registerAndLogin(owner);
+        String memberToken = registerAndLogin(member);
+        long projectId = createProject(ownerToken, "无引用技能-" + SUFFIX);
+        addMemberOk(ownerToken, projectId, member);
+        long skillId = uploadDeletionTestSkill(memberToken, projectId);
+
+        mockMvc.perform(delete("/api/skills/" + skillId)
+                        .header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+        assertSkillDeletionState(skillId, 1);
+        assertTrue(java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(
+                        STORAGE_ROOT, "projects", String.valueOf(projectId), "skills",
+                        String.valueOf(skillId), "v1", "SKILL.md")),
+                "逻辑删除必须保留技能文件");
         mockMvc.perform(get("/api/projects/" + projectId + "/skills")
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(jsonPath("$.data.length()").value(0));
-        // 删完后查不到 → 404 / 10301
         mockMvc.perform(get("/api/skills/" + skillId + "/versions")
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value(10301));
-
-        // ---- 未被引用：成员上传 → 成员删自己的 → 成功 ----
-        long freeSkillId = readData(uploadOk(memberToken, projectId, "free.zip",
-                zipWithRawEntries(new LinkedHashMap<>(Map.of("SKILL.md", "# 自由技能\n"))))).path("id").asLong();
-        mockMvc.perform(delete("/api/skills/" + freeSkillId)
-                        .header("Authorization", "Bearer " + memberToken))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(0));
-        mockMvc.perform(get("/api/projects/" + projectId + "/skills")
-                        .header("Authorization", "Bearer " + ownerToken))
-                .andExpect(jsonPath("$.data.length()").value(0));
     }
 
     // ------------------------------------------------------------------
@@ -463,6 +501,11 @@ class SkillApiTest {
                 .andReturn();
     }
 
+    private long uploadDeletionTestSkill(String token, long projectId) throws Exception {
+        return readData(uploadOk(token, projectId, "delete-test.zip",
+                zipWithRawEntries(ordered("SKILL.md", "# 删除保护测试技能\n")))).path("id").asLong();
+    }
+
     /** 下载并按 zip 解出"相对路径 → 文本内容" */
     private Map<String, String> downloadAndUnzip(String token, long skillId, int versionNo) throws Exception {
         MvcResult result = mockMvc.perform(get("/api/skills/" + skillId + "/versions/" + versionNo + "/download")
@@ -545,6 +588,11 @@ class SkillApiTest {
         return jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
     }
 
+    private void linkWorkflowSkill(long nodeId, long skillId) {
+        jdbcTemplate.update("INSERT INTO wb_workflow_node_skill (node_id, skill_id, seq) VALUES (?, ?, 1)",
+                nodeId, skillId);
+    }
+
     private long insertRequirement(long projectId, long workflowId, long creatorId, String title) {
         jdbcTemplate.update("INSERT INTO wb_requirement (project_id, workflow_id, title, description, creator_id,"
                         + " status, current_seq, dsh_workspace_path, revision, created_at, updated_at)"
@@ -569,9 +617,10 @@ class SkillApiTest {
         return count == null ? 0 : count;
     }
 
-    private int countVersions(long skillId) {
-        Integer count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM wb_skill_version WHERE skill_id = ?", Integer.class, skillId);
-        return count == null ? 0 : count;
+    private void assertSkillDeletionState(long skillId, int deleted) {
+        assertEquals(deleted, jdbcTemplate.queryForObject(
+                "SELECT deleted FROM wb_skill WHERE id = ?", Integer.class, skillId));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM wb_skill_version WHERE skill_id = ?", Integer.class, skillId));
     }
 }

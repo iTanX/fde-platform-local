@@ -9,7 +9,7 @@
     1) wb_requirement_node.primary_session_id（由 SessionService 直接读节点行，不在本文件里）；
     2) 需求下 archived = 0 且 last_active_at 最大 → selectMostActiveByRequirement；
     3) 都没有 → null（前端进入"新建会话"流程）。
-  这里统一排除 archived=1：归档会话仍可在列表里看到，但不再作为默认打开对象。
+  需求级默认查询仅查未归档会话，列表仍包含归档会话。
 -->
 <mapper namespace="com.fde.workbench.dao.mapper.SessionMapper">
 
@@ -39,10 +39,11 @@
                 #{lastActiveAt}, #{archived}, #{createdAt}, #{updatedAt})
     </insert>
 
-    <insert id="insertRuntimeInfo">
+    <insert id="saveRuntimeNode">
         INSERT INTO wb_session_runtime_info (agent_session_id, last_node_instance_id, message_count,
                                              created_at, updated_at)
         VALUES (#{agentSessionId}, #{lastNodeInstanceId}, 0, #{now}, #{now})
+        ON DUPLICATE KEY UPDATE last_node_instance_id = #{lastNodeInstanceId}, updated_at = #{now}
     </insert>
 
     <!-- 弱关联允许"同一会话在同一节点重复登记"：已存在则跳过，不报错 -->

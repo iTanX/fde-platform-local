@@ -4,6 +4,7 @@ import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.dao.entity.AgentSession;
 import com.fde.workbench.dao.entity.ProjectWithStats;
+import com.fde.workbench.dao.entity.Requirement;
 import com.fde.workbench.dao.entity.RequirementNode;
 import com.fde.workbench.dao.entity.RequirementWithStats;
 import com.fde.workbench.dao.mapper.RequirementMapper;
@@ -26,22 +27,10 @@ import java.util.Objects;
 /**
  * 会话服务（docs/api.md §9、§11 {@code /internal/sessions}；PRD REQ-X1/X2、AC-F7.2/F7.4/X2.1/X2.2）。
  * <p>
- * <b>职责边界</b>：本类只管"会话与需求 / 节点的图书链"——登记、列表、touch、默认会话解析。
- * DSH 会话本身由插件创建（{@code uiWorkspace.connectWorkspace}），Java 侧不做任何 DSH 调用。
+ * DSH 会话由插件创建。登记或显式切换会话时，在同一个事务中更新当前节点默认会话、
+ * 会话运行位置及节点与会话的历史关联。
  * <p>
- * <b>登记事务（api.md §9 四步，缺一不可）</b>：
- * <ol>
- *   <li>插入 {@code wb_agent_session}（{@code dsh_session_id} 全局唯一）；</li>
- *   <li>插入 {@code wb_session_runtime_info}（记录最后所在节点，恢复时用）；</li>
- *   <li><b>若节点 {@code primary_session_id} 为空</b>则设为新会话（AC-X2.1：已绑定过的节点不被新会话抢走）；</li>
- *   <li>插入 {@code wb_node_session_link}（展示用弱关联）。</li>
- * </ol>
- * 四步在同一个 {@link TransactionTemplate} 里，失败整体回滚——不会出现"会话建了、节点没绑定"的半状态。
- * <p>
- * <b>默认会话解析（api.md §9）</b>：节点 {@code primary_session_id} → 需求下 {@code archived=0}
- * 且 {@code last_active_at} 最大 → 都没有返回 null（前端进入"新建会话"）。
- * 节点推进时<b>不复制</b>旧节点绑定（plugin-integration.md §6）：下一节点没有 primary 时会落到
- * 第 2 条，自然命中同一个会话，历史连续可见（AC-F7.3）。
+ * 默认会话优先读取节点的 {@code primary_session_id}，其次读取需求下最近活跃的未归档会话。
  */
 @Service
 public class SessionService {
@@ -125,7 +114,7 @@ public class SessionService {
         if (!owner && !Objects.equals(requirement.getCreatorId(), user.userId())) {
             throw BizException.of(ErrorCode.FORBIDDEN, "只有需求创建者或项目 owner 可以登记会话");
         }
-        return doRegister(requirement, command, user.userId());
+        return doRegister(requirementId, command, user.userId());
     }
 
     /**
@@ -137,86 +126,70 @@ public class SessionService {
      * 语义一致（见 {@code InternalOperator}）。
      *
      * @param requirementId 需求 ID
-     * @param command       登记命令（{@code nodeId} 为空时取需求当前节点）
+     * @param command       登记命令（{@code nodeId} 为空时只登记到需求）
      * @return 新会话
      * @throws BizException 需求不存在 404/10301；参数非法 400/10001；重复 409/10401
      */
     public SessionVO registerInternal(Long requirementId, SessionRegisterCommand command) {
-        RequirementWithStats requirement = requireExistingRequirement(requirementId);
-        return doRegister(requirement, command, requirement.getCreatorId());
+        return doRegister(requirementId, command, null);
     }
 
-    /**
-     * 登记事务本体（四步见类注释）。
-     *
-     * @param requirement 需求
-     * @param command     命令
-     * @param createdBy   记录到 {@code created_by} 的用户
-     * @return 新会话视图
-     */
-    private SessionVO doRegister(RequirementWithStats requirement, SessionRegisterCommand command, Long createdBy) {
+    private SessionVO doRegister(Long requirementId, SessionRegisterCommand command, Long createdBy) {
         String dshSessionId = requireDshSessionId(command == null ? null : command.dshSessionId());
         String title = normalizeTitle(command.title());
-        RequirementNode node = resolveRegistrationNode(requirement, command.nodeId());
-
-        // 先做一次可读的重复判定（唯一键仍是最终保障，并发时由 DuplicateKeyException 兜住）
-        AgentSession existing = sessionMapper.selectByDshSessionId(dshSessionId);
-        if (existing != null) {
-            throw BizException.of(ErrorCode.DUPLICATE_NAME,
-                    "该 DSH 会话已登记过（会话 " + existing.getId() + "）");
-        }
-
-        LocalDateTime now = now();
+        Long nodeId = command.nodeId();
         AgentSession saved;
         try {
             saved = transactionTemplate.execute(status -> {
+                Requirement requirement = lockRequirement(requirementId);
+                if (sessionMapper.selectByDshSessionId(dshSessionId) != null) {
+                    throw BizException.of(ErrorCode.DUPLICATE_NAME, "该 DSH 会话已登记过：" + dshSessionId);
+                }
+                if (nodeId != null) {
+                    requireCurrentNode(requirement, nodeId);
+                }
+                LocalDateTime now = now();
                 AgentSession session = new AgentSession();
-                session.setRequirementId(requirement.getId());
+                session.setRequirementId(requirementId);
                 session.setDshSessionId(dshSessionId);
-                // workspace 冗余存需求 workspace 绝对路径：恢复会话时不必再回查需求行
                 session.setDshWorkspacePath(requirement.getDshWorkspacePath());
                 session.setTitle(title);
-                session.setCreatedBy(createdBy);
+                session.setCreatedBy(createdBy == null ? requirement.getCreatorId() : createdBy);
                 session.setLastActiveAt(now);
                 session.setArchived(0);
                 session.setCreatedAt(now);
                 session.setUpdatedAt(now);
                 sessionMapper.insertSession(session);
-
-                sessionMapper.insertRuntimeInfo(session.getId(), node == null ? null : node.getId(), now);
-                if (node != null) {
-                    // AC-X2.1 / AC-F7.4：只在 primary 为空时绑定，节点已绑定过就不抢
-                    requirementMapper.bindPrimarySessionIfAbsent(node.getId(), session.getId());
-                    sessionMapper.insertNodeSessionLink(node.getId(), session.getId(), now);
-                }
+                saveNodeSelection(session.getId(), nodeId, now);
                 return session;
             });
         } catch (DuplicateKeyException ex) {
-            // 并发下两次登记同一 dshSessionId：唯一键 uk_agent_session_dsh 拦住后到者
+            // 不同需求的并发登记也受 DSH 会话标识的全局唯一键约束。
             throw BizException.of(ErrorCode.DUPLICATE_NAME, "该 DSH 会话已登记过：" + dshSessionId);
         }
         log.info("登记会话：requirementId={}, sessionId={}, dshSessionId={}, nodeId={}, createdBy={}",
-                requirement.getId(), saved.getId(), dshSessionId, node == null ? null : node.getId(), createdBy);
-        return toVO(saved, node != null);
+                requirementId, saved.getId(), dshSessionId, nodeId, saved.getCreatedBy());
+        return toVO(saved, nodeId != null);
     }
 
-    /**
-     * 校验登记时绑定的节点：必须属于该需求。
-     *
-     * @param requirement 需求
-     * @param nodeId      命令里的节点 ID
-     * @return 节点；{@code nodeId} 为空时返回 null（不绑定节点）
-     * @throws BizException 节点不属于该需求 → 400/10001
-     */
-    private RequirementNode resolveRegistrationNode(RequirementWithStats requirement, Long nodeId) {
-        if (nodeId == null) {
-            return null;
-        }
+    private void requireCurrentNode(Requirement requirement, Long nodeId) {
         RequirementNode node = requirementMapper.selectNodeById(nodeId);
         if (node == null || !Objects.equals(node.getRequirementId(), requirement.getId())) {
             throw BizException.of(ErrorCode.PARAM_INVALID, "节点不属于该需求：" + nodeId);
         }
-        return node;
+        if (!Requirement.STATUS_IN_PROGRESS.equals(requirement.getStatus())
+                || !RequirementNode.STATUS_CURRENT.equals(node.getStatus())
+                || !Objects.equals(node.getSeq(), requirement.getCurrentSeq())) {
+            throw BizException.of(ErrorCode.STATE_NOT_ALLOWED, "只有进行中需求的当前节点可以选择会话");
+        }
+    }
+
+    private void saveNodeSelection(Long sessionId, Long nodeId, LocalDateTime now) {
+        sessionMapper.saveRuntimeNode(sessionId, nodeId, now);
+        if (nodeId != null) {
+            requirementMapper.setPrimarySession(nodeId, sessionId);
+            sessionMapper.insertNodeSessionLink(nodeId, sessionId, now);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -224,15 +197,13 @@ public class SessionService {
     // ------------------------------------------------------------------
 
     /**
-     * 更新会话最后活跃时间（权限 C：需求创建人或 owner）。
-     * <p>
-     * 不传时间、一律用服务端时间：时间必须由应用写入（api.md §1.5），客户端时钟不可信。
+     * 用服务端时间更新最近活跃时间（权限 C）。传入节点 ID 时同时保存显式选择。
      *
      * @param sessionId 会话 ID
+     * @param nodeId    当前节点实例 ID，可空
      * @return 更新后的会话
-     * @throws BizException 会话不存在 404/10301；项目不存在 404/10301；非成员 403/10201；非创建者非 owner 403/10202
      */
-    public SessionVO touch(Long sessionId) {
+    public SessionVO touch(Long sessionId, Long nodeId) {
         CurrentUser user = currentUserContext.require();
         AgentSession session = requireExistingSession(sessionId);
         RequirementWithStats requirement = requireExistingRequirement(session.getRequirementId());
@@ -242,14 +213,23 @@ public class SessionService {
         if (!owner && !Objects.equals(requirement.getCreatorId(), user.userId())) {
             throw BizException.of(ErrorCode.FORBIDDEN, "只有需求创建者或项目 owner 可以更新会话活跃时间");
         }
-        LocalDateTime now = now();
-        sessionMapper.updateLastActive(sessionId, now);
-        AgentSession updated = sessionMapper.selectById(sessionId);
-        List<Long> primarySessionIds = requirementMapper.selectNodesByRequirement(requirement.getId()).stream()
-                .map(RequirementNode::getPrimarySessionId)
-                .filter(Objects::nonNull)
-                .toList();
-        return toVO(updated, primarySessionIds.contains(updated.getId()));
+        return transactionTemplate.execute(status -> {
+            Requirement locked = lockRequirement(requirement.getId());
+            AgentSession latest = requireExistingSession(sessionId);
+            LocalDateTime now = now();
+            if (nodeId != null) {
+                requireCurrentNode(locked, nodeId);
+                if (isArchived(latest)) {
+                    throw BizException.of(ErrorCode.STATE_NOT_ALLOWED, "已归档会话不能设为默认会话");
+                }
+                saveNodeSelection(sessionId, nodeId, now);
+            }
+            sessionMapper.updateLastActive(sessionId, now);
+            latest.setLastActiveAt(now);
+            boolean primary = nodeId != null || requirementMapper.selectNodesByRequirement(requirement.getId()).stream()
+                    .anyMatch(node -> Objects.equals(node.getPrimarySessionId(), sessionId));
+            return toVO(latest, primary);
+        });
     }
 
     // ------------------------------------------------------------------
@@ -257,10 +237,7 @@ public class SessionService {
     // ------------------------------------------------------------------
 
     /**
-     * 解析某节点的默认会话（api.md §9 的三步顺序）。
-     * <p>
-     * 第 1 步命中后<b>不再校验归档</b>：节点绑定是"用户主动在这个节点建了会话"的显式选择
-     * （AC-F7.4：新建会话 B 后再打开该节点，默认打开 B），优先级高于"最近活跃"。
+     * 解析某节点的默认会话（api.md §9 的三步顺序），优先使用节点上仍有效的选择。
      *
      * @param requirementId 需求 ID
      * @param node          节点实例（可空：为空时只看需求级最近活跃）
@@ -269,11 +246,22 @@ public class SessionService {
     public AgentSession resolveDefaultSession(Long requirementId, RequirementNode node) {
         if (node != null && node.getPrimarySessionId() != null) {
             AgentSession primary = sessionMapper.selectById(node.getPrimarySessionId());
-            if (primary != null && Objects.equals(primary.getRequirementId(), requirementId)) {
+            if (primary != null && Objects.equals(primary.getRequirementId(), requirementId) && !isArchived(primary)) {
                 return primary;
             }
         }
         return sessionMapper.selectMostActiveByRequirement(requirementId);
+    }
+
+    /**
+     * 推进时把前一节点的默认会话保存到下一节点。调用方须处在持有需求锁的推进事务中。
+     */
+    void inheritDefaultSession(Long requirementId, Long previousNodeId, Long nextNodeId) {
+        RequirementNode previousNode = requirementMapper.selectNodeById(previousNodeId);
+        AgentSession session = resolveDefaultSession(requirementId, previousNode);
+        if (session != null) {
+            requirementMapper.setPrimarySession(nextNodeId, session.getId());
+        }
     }
 
     /**
@@ -294,8 +282,20 @@ public class SessionService {
 
     private SessionVO toVO(AgentSession session, boolean nodePrimary) {
         return new SessionVO(session.getId(), session.getRequirementId(), session.getDshSessionId(),
-                session.getTitle(), SessionVO.toOffset(session.getLastActiveAt()),
-                session.getArchived() != null && session.getArchived() == 1, nodePrimary);
+                session.getTitle(), SessionVO.toOffset(session.getLastActiveAt()), isArchived(session), nodePrimary);
+    }
+
+    private static boolean isArchived(AgentSession session) {
+        return Objects.equals(session.getArchived(), 1);
+    }
+
+    private Requirement lockRequirement(Long requirementId) {
+        // 与节点推进共用同一需求锁，确保切换和推进按事务顺序生效。
+        Requirement requirement = requirementMapper.selectByIdForUpdate(requirementId);
+        if (requirement == null) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "需求不存在");
+        }
+        return requirement;
     }
 
     /**

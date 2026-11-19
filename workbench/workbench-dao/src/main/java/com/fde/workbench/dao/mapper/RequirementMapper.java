@@ -76,6 +76,9 @@ public interface RequirementMapper {
      */
     RequirementWithStats selectById(@Param("id") Long id);
 
+    /** 锁定需求行，串行化同一需求内的输入、输出与推进事务。 */
+    Requirement selectByIdForUpdate(@Param("id") Long id);
+
     /**
      * 插入需求行。
      * <p>
@@ -208,13 +211,13 @@ public interface RequirementMapper {
     int markRequirementCompleted(@Param("id") Long id, @Param("now") LocalDateTime now);
 
     /**
-     * 设置节点的默认会话（仅当 {@code primary_session_id} 为空时写入，PRD AC-X2.1）。
+     * 保存节点的默认会话。
      *
      * @param id        节点实例 ID
      * @param sessionId 会话 ID
-     * @return 影响行数；0 表示已绑定过或被删
+     * @return 影响行数
      */
-    int bindPrimarySessionIfAbsent(@Param("id") Long id, @Param("sessionId") Long sessionId);
+    int setPrimarySession(@Param("id") Long id, @Param("sessionId") Long sessionId);
 
     /**
      * 物理删除某需求的全部节点实例。

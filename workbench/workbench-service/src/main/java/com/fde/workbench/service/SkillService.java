@@ -12,7 +12,7 @@ import com.fde.workbench.dao.entity.SkillWithStats;
 import com.fde.workbench.dao.mapper.SkillMapper;
 import com.fde.workbench.service.bo.CurrentUser;
 import com.fde.workbench.service.security.CurrentUserContext;
-import com.fde.workbench.service.vo.SkillReferencesVO;
+import com.fde.workbench.service.vo.NodeSnapshots;
 import com.fde.workbench.service.vo.SkillVO;
 import com.fde.workbench.service.vo.SkillVersionVO;
 import org.slf4j.Logger;
@@ -377,7 +377,25 @@ public class SkillService {
      */
     public SkillFileContent previewFile(Long skillId, Integer versionNo, String path) {
         Skill skill = requireAccessibleSkill(skillId);
-        SkillVersion version = requireVersion(skill, versionNo);
+        return readVersionFile(skill, requireVersion(skill, versionNo), path, false);
+    }
+
+    /** 只读取调用方已从当前节点解析出的快照版本。 */
+    SkillFileContent readSnapshotEntry(Long projectId, NodeSnapshots.SkillItem snapshot) {
+        if (snapshot.versionId() == null || snapshot.versionNo() == null) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "节点技能没有快照版本");
+        }
+        Skill skill = requireExistingSkill(snapshot.skillId());
+        SkillVersion version = skillMapper.selectVersionById(snapshot.versionId());
+        if (!Objects.equals(projectId, skill.getProjectId()) || version == null
+                || !Objects.equals(version.getSkillId(), skill.getId())
+                || !Objects.equals(version.getVersionNo(), snapshot.versionNo())) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "节点技能快照版本不存在");
+        }
+        return readVersionFile(skill, version, SkillPackageExtractor.ENTRY_FILE, true);
+    }
+
+    private SkillFileContent readVersionFile(Skill skill, SkillVersion version, String path, boolean requireIntact) {
         List<SkillPackageExtractor.ExtractResult.FileEntry> files = parseFiles(version.getFilesJson());
         SkillPackageExtractor.ExtractResult.FileEntry target = files.stream()
                 .filter(file -> file.path().equals(path))
@@ -390,16 +408,24 @@ public class SkillService {
             throw BizException.of(ErrorCode.NOT_FOUND, "技能文件缺失：" + target.path());
         }
         try {
+            if (requireIntact && !storage.root().toRealPath().resolve(storage.root().relativize(file))
+                    .equals(file.toRealPath())) {
+                throw BizException.of(ErrorCode.NOT_FOUND, "节点技能文件路径异常");
+            }
             byte[] bytes = Files.readAllBytes(file);
-            // 内容一致性校验：清单里的 sha256 是上传时的摘要，读回来不一致说明文件被外部改动
+            // 模型执行严格绑定快照内容。保持项目页面预览已有的告警行为。
             String actualSha256 = SkillPackageExtractor.sha256OfBytes(bytes);
             if (!actualSha256.equals(target.sha256())) {
-                log.warn("技能文件内容与清单不一致：skillId={}, versionNo={}, path={}", skillId, versionNo, target.path());
+                if (requireIntact) {
+                    throw BizException.of(ErrorCode.INTERNAL_ERROR, "节点技能文件与快照摘要不一致");
+                }
+                log.warn("技能文件内容与清单不一致：skillId={}, versionNo={}, path={}",
+                        skill.getId(), version.getVersionNo(), target.path());
             }
             return new SkillFileContent(target.path(), target.size(), target.sha256(),
                     new String(bytes, StandardCharsets.UTF_8));
         } catch (IOException ex) {
-            log.error("读取技能文件失败：skillId={}, path={}", skillId, target.path(), ex);
+            log.error("读取技能文件失败：skillId={}, path={}", skill.getId(), target.path(), ex);
             throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "技能文件读取失败");
         }
     }
@@ -411,14 +437,8 @@ public class SkillService {
     /**
      * 删除技能（逻辑删除）：创建者本人或项目 owner。
      * <p>
-     * 引用校验口径（docs/api.md §5）：若技能仍被<b>未完成需求</b>的节点实例
-     * {@code skills_snapshot} 引用（且该流程节点仍在模板 {@code wb_workflow_node_skill} 中挂着该技能）→
-     * {@code 409/10403} 并返回引用清单；已完成需求的引用不阻止删除（PRD AC-D2.2）。
-     * <p>
-     * 事务边界：本方法<b>不</b>加 {@code @Transactional}。原因是"校验 → 抛异常"这一步在遇到引用时
-     * 只有一次 SELECT，没有需要回滚的写；真正的写只有最后一条 {@code UPDATE ... WHERE deleted = 0}，
-     * 它本身是单条语句（原子），并发重复删除时后到者影响 0 行，转为 404，不会出现半更新状态。
-     * 少开一个事务也就少一次"校验后紧跟着别人新建需求"的窗口锁竞争。
+     * 活跃流程模板或未完成需求的节点快照引用该技能时，返回 {@code 409/10403} 及引用清单
+     * （docs/api.md §5）。已完成需求的快照用于历史追溯。
      * <p>
      * 为什么"未被引用"也只做<b>逻辑删除</b>：版本行被历史需求的 skills_snapshot 按 versionId 引用，
      * 物理删除后历史需求就查不到"当时用的哪一版"；逻辑删除让列表消失、历史可追溯。
@@ -439,15 +459,18 @@ public class SkillService {
             throw BizException.of(ErrorCode.FORBIDDEN, "只有技能上传者或项目 owner 可以删除该技能");
         }
 
-        List<SkillReference> references = skillMapper.selectUnfinishedReferences(skillId);
-        if (!references.isEmpty()) {
-            log.warn("删除技能被拒绝：skillId={}, 引用数={}", skillId, references.size());
-            throw SkillReferencedException.of(references);
-        }
-        if (skillMapper.markDeleted(skillId, skill.getProjectId(), LocalDateTime.now()) != 1) {
-            // 并发下被别人先删掉：按"已不存在"处理，避免前端误以为还有数据
-            throw BizException.of(ErrorCode.NOT_FOUND, "技能不存在或已被删除");
-        }
+        transactionTemplate.executeWithoutResult(status -> {
+            // 先锁技能行，再建立引用查询的读视图，确保能看见先获得共享锁且已提交的引用。
+            if (skillMapper.lockActiveSkillForDelete(skillId, skill.getProjectId()) == null) {
+                throw BizException.of(ErrorCode.NOT_FOUND, "技能不存在或已被删除");
+            }
+            List<SkillReference> references = skillMapper.selectBlockingReferences(skillId);
+            if (!references.isEmpty()) {
+                log.warn("删除技能被拒绝：skillId={}, 引用数={}", skillId, references.size());
+                throw SkillReferencedException.of(references);
+            }
+            skillMapper.markDeleted(skillId, skill.getProjectId(), LocalDateTime.now());
+        });
         log.info("删除技能（逻辑删除）：skillId={}, 操作人={}", skillId, user.userId());
     }
 

@@ -1,6 +1,7 @@
 package com.fde.workbench.api.controller;
 
 import com.fde.workbench.api.dto.SessionCreateRequest;
+import com.fde.workbench.api.dto.SessionTouchRequest;
 import com.fde.workbench.api.vo.AdvancePreviewVO;
 import com.fde.workbench.api.vo.NodeInputUploadVO;
 import com.fde.workbench.api.vo.RequirementNodeVO;
@@ -155,13 +156,15 @@ public class NodeController {
     }
 
     /**
-     * POST /api/sessions/{sessionId}/touch —— 更新会话最后活跃时间（权限 C）。
+     * POST /api/sessions/{sessionId}/touch —— 更新会话活跃时间，可同时设为当前节点的默认会话（权限 C）。
      *
      * @param sessionId 会话 ID
+     * @param request   可选请求体，包含当前节点实例 ID
      * @return 更新后的会话
      */
     @PostMapping(value = "/api/sessions/{sessionId}/touch", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ApiResult<SessionVO> touch(@PathVariable Long sessionId) {
-        return ApiResult.ok(SessionVO.of(sessionService.touch(sessionId)));
+    public ApiResult<SessionVO> touch(@PathVariable Long sessionId,
+                                     @RequestBody(required = false) SessionTouchRequest request) {
+        return ApiResult.ok(SessionVO.of(sessionService.touch(sessionId, request == null ? null : request.nodeId())));
     }
 }

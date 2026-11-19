@@ -129,6 +129,14 @@
          WHERE r.id = #{id}
     </select>
 
+    <select id="selectByIdForUpdate" resultMap="RequirementMap" useCache="false">
+        SELECT id, project_id, workflow_id, title, description, creator_id, status,
+               current_seq, dsh_workspace_path, revision, created_at, updated_at
+          FROM wb_requirement
+         WHERE id = #{id}
+           FOR UPDATE
+    </select>
+
     <!--
       插入需求。dsh_workspace_path 为 NOT NULL 且允许回填，因此这里先写调用方给的占位值
       （同一事务内的临时值），拿到自增 ID 后由 updateWorkspacePath 换成正式绝对路径。
@@ -249,12 +257,10 @@
          WHERE id = #{id}
     </update>
 
-    <!-- 只在 primary_session_id 为空时绑定（PRD AC-X2.1：已绑定过的节点不被新会话抢走） -->
-    <update id="bindPrimarySessionIfAbsent">
+    <update id="setPrimarySession">
         UPDATE wb_requirement_node
            SET primary_session_id = #{sessionId}
          WHERE id = #{id}
-           AND primary_session_id IS NULL
     </update>
 
     <delete id="deleteNodesByRequirement">

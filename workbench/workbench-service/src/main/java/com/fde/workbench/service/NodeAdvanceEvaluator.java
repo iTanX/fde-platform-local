@@ -1,17 +1,24 @@
 package com.fde.workbench.service;
 
+import com.fde.workbench.common.error.BizException;
+import com.fde.workbench.common.error.ErrorCode;
 import com.fde.workbench.dao.entity.NodeInputFile;
 import com.fde.workbench.dao.entity.NodeOutputRecord;
+import com.fde.workbench.dao.entity.Requirement;
+import com.fde.workbench.dao.entity.RequirementNode;
 import com.fde.workbench.dao.entity.WorkflowNode;
 import com.fde.workbench.dao.mapper.NodeInputMapper;
 import com.fde.workbench.dao.mapper.NodeOutputMapper;
+import com.fde.workbench.dao.mapper.RequirementMapper;
 import com.fde.workbench.service.vo.AdvancePreviewVO;
 import com.fde.workbench.service.vo.NodeSnapshots;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -38,9 +45,16 @@ public class NodeAdvanceEvaluator {
 
     private final NodeOutputMapper nodeOutputMapper;
 
-    public NodeAdvanceEvaluator(NodeInputMapper nodeInputMapper, NodeOutputMapper nodeOutputMapper) {
+    private final RequirementMapper requirementMapper;
+
+    private final SessionService sessionService;
+
+    public NodeAdvanceEvaluator(NodeInputMapper nodeInputMapper, NodeOutputMapper nodeOutputMapper,
+                                RequirementMapper requirementMapper, SessionService sessionService) {
         this.nodeInputMapper = nodeInputMapper;
         this.nodeOutputMapper = nodeOutputMapper;
+        this.requirementMapper = requirementMapper;
+        this.sessionService = sessionService;
     }
 
     /**
@@ -75,6 +89,36 @@ public class NodeAdvanceEvaluator {
             }
         }
         return new Evaluation(missingOutputs, missingInputs, requiresAnyInput, snapshot);
+    }
+
+    /** 文件登记完成后，在持有需求行锁的事务里判定及推进。 */
+    AdvanceOutcome evaluateAndAdvance(Requirement requirement, RequirementNode node,
+                                      NodeSnapshots.NodeSnapshot snapshot, LocalDateTime now) {
+        Evaluation evaluation = evaluate(node.getId(), node.getInputType(), snapshot);
+        if (!evaluation.ready() || !RequirementNode.STATUS_CURRENT.equals(node.getStatus())) {
+            return new AdvanceOutcome(false, null, false, evaluation.missingOutputs(), evaluation.missingInputs());
+        }
+        RequirementNode next = requirementMapper.selectNodesByRequirement(requirement.getId()).stream()
+                .filter(candidate -> Objects.equals(candidate.getSeq(), node.getSeq() + 1))
+                .findFirst()
+                .orElse(null);
+        if (requirementMapper.markNodeDone(node.getId(), null, now) != 1) {
+            throw BizException.of(ErrorCode.INTERNAL_ERROR, "当前节点推进失败");
+        }
+        if (next == null) {
+            requirementMapper.markRequirementCompleted(requirement.getId(), now);
+            return new AdvanceOutcome(true, null, true, List.of(), List.of());
+        }
+        if (requirementMapper.markNodeCurrent(next.getId(), now) != 1
+                || requirementMapper.advanceCurrentSeq(requirement.getId(), now) != 1) {
+            throw BizException.of(ErrorCode.INTERNAL_ERROR, "下一节点推进失败");
+        }
+        sessionService.inheritDefaultSession(requirement.getId(), node.getId(), next.getId());
+        return new AdvanceOutcome(true, next.getName(), false, List.of(), List.of());
+    }
+
+    record AdvanceOutcome(boolean advanced, String nextNodeName, boolean completed,
+                          List<String> remainingOutputs, List<Long> remainingInputs) {
     }
 
     /**

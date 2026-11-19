@@ -14,6 +14,8 @@ import org.springframework.test.web.servlet.MvcResult;
 
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,6 +28,9 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -61,7 +66,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>sha256 不符拒绝、路径越界拒绝、内部令牌错误 401；</li>
  *   <li>会话登记（用户侧 / 内部侧）与默认会话解析、touch 生效、重复 409；</li>
  *   <li>文件下载鉴权与中文文件名下载头、文本预览；</li>
- *   <li>需求删除时清理输入、输出、文件、会话（T5-1 补齐的缺口）。</li>
+ *   <li>需求删除时清理输入、输出、文件、会话（T5-1 补齐的缺口）；</li>
+ *   <li><b>输入侧补传也能推进</b>（端到端阻塞问题）：先 commit 输出、再上传必填输入，上传本身触发推进；
+ *       需求已完成 / 输出未齐时上传不推进（幂等）。</li>
  * </ol>
  */
 @SpringBootTest(properties = {
@@ -261,6 +268,8 @@ class NodeApiTest {
         JsonNode current = nodeDetailOk(fixture.token, fixture.requirementId, node1);
         assertFalse(current.path("readonly").asBoolean(), "创建人看当前节点应可操作");
         assertTrue(current.path("previousNode").isNull(), "第一个节点没有上一节点");
+        assertEquals(jdbcTemplate.queryForObject("SELECT dsh_workspace_path FROM wb_requirement WHERE id = ?",
+                String.class, fixture.requirementId), current.path("workspacePath").asText());
 
         // ② 非当前节点 → readonly=true（即便我是创建人）
         JsonNode notCurrent = nodeDetailOk(fixture.token, fixture.requirementId, node2);
@@ -269,6 +278,7 @@ class NodeApiTest {
         // ③ 他人的需求（普通成员、非创建人、非 owner）→ readonly=true
         JsonNode byMember = nodeDetailOk(fixture.memberToken, fixture.requirementId, node1);
         assertTrue(byMember.path("readonly").asBoolean(), "非创建人看他人需求必须只读");
+        assertTrue(byMember.path("workspacePath").isNull(), "只读用户不应获得工作区绝对路径");
 
         // 反例：项目 owner 看别人的需求 → 可操作（owner 也是权限 C）
         Fixture owned = prepareOwnedByMember("ro2");
@@ -310,13 +320,14 @@ class NodeApiTest {
         assertEquals(0, withoutInput.path("remainingRequiredOutputs").size());
         assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
 
-        // ---- 补上输入后再提交 → 推进到节点 2 ----
-        uploadOk(fixture.token, fixture.requirementId, node1, null,
+        // ---- 补上输入后推进到节点 2；重试相同输出保留版本 1 ----
+        JsonNode advanced = uploadOk(fixture.token, fixture.requirementId, node1, null,
                 "客户原话.md", "客户说要分诊".getBytes(StandardCharsets.UTF_8));
-        JsonNode advanced = commit(fixture, node1, "clarify-notes", "澄清记录内容");
         assertTrue(advanced.path("advanced").asBoolean(), "必填项齐备后应推进");
         assertEquals("需求拆解", advanced.path("nextNodeName").asText());
-        assertEquals(1, advanced.path("versionNo").asInt(), "首次提交版本号为 1");
+        JsonNode unchanged = commit(fixture, node1, "clarify-notes", "澄清记录内容");
+        assertFalse(unchanged.path("advanced").asBoolean());
+        assertEquals(1, unchanged.path("versionNo").asInt(), "相同内容重试保留版本 1");
         assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId));
         assertEquals(2, jdbcTemplate.queryForObject("SELECT current_seq FROM wb_requirement WHERE id = ?",
                 Integer.class, fixture.requirementId));
@@ -358,10 +369,9 @@ class NodeApiTest {
                 + " AND original_name = 'requirement-items.md'", fixture.requirementId),
                 "旧版本的 wb_file 要保留（审计）");
 
-        // ---- 上传必填输入后再提交 → 推进到节点 3 ----
-        uploadOk(fixture.token, fixture.requirementId, node2, fixture.node2InputItemId,
+        // ---- 上传必填输入 → 推进到节点 3 ----
+        JsonNode done = uploadOk(fixture.token, fixture.requirementId, node2, fixture.node2InputItemId,
                 "客户原话.md", "客户原话内容".getBytes(StandardCharsets.UTF_8));
-        JsonNode done = commit(fixture, node2, "acceptance-criteria", "验收标准 v2");
         assertTrue(done.path("advanced").asBoolean(), "必填输入 + 必填输出齐备后应推进");
         assertEquals("需求确认", done.path("nextNodeName").asText());
         assertFalse(done.path("requirementCompleted").asBoolean());
@@ -370,9 +380,8 @@ class NodeApiTest {
         // ---- 最后一个节点：empty 输入也必须有（free）+ 输出 → 需求 completed ----
         JsonNode noFreeInput = commit(fixture, node3, "confirm-summary", "确认结论");
         assertFalse(noFreeInput.path("advanced").asBoolean(), "free 节点没有输入文件时不得完成");
-        uploadOk(fixture.token, fixture.requirementId, node3, null,
+        JsonNode last = uploadOk(fixture.token, fixture.requirementId, node3, null,
                 "确认.md", "确认内容".getBytes(StandardCharsets.UTF_8));
-        JsonNode last = commit(fixture, node3, "confirm-summary", "确认结论");
         assertTrue(last.path("advanced").asBoolean());
         assertTrue(last.path("requirementCompleted").asBoolean(), "最后一个节点完成后需求应为 completed");
         assertTrue(last.path("nextNodeName").isNull());
@@ -381,6 +390,240 @@ class NodeApiTest {
                 String.class, fixture.requirementId));
         // 已完成需求再提交 → 409/10404
         commitExpect(fixture, node3, "confirm-summary", "again", status().isConflict(), 10404);
+    }
+
+    // ==================================================================
+    // 用例 3b（端到端阻塞问题）：输入侧补传也能推进
+    //
+    // 背景：真实用户完全可能"先让模型产出、再补传资料"。修复前推进判定只在 commit 事务里执行，
+    // 于是 commit 返回 advanced=false 之后再也没有触发点：advance-preview.ready=true，
+    // 需求却一直停在当前节点。修复后上传输入的事务末尾也会做一次判定（复用同一段实现）。
+    // ==================================================================
+
+    @Test
+    void uploadInput_advancesNodeWhenOutputsWereCommittedFirst() throws Exception {
+        Fixture fixture = prepare("ur", true);
+        long node1 = fixture.nodes.get(0).id();
+        long node2 = fixture.nodes.get(1).id();
+        long node3 = fixture.nodes.get(2).id();
+
+        // ---- 节点 1：先提交输出（还没有任何输入）→ 不推进，缺输入 ----
+        JsonNode withoutInput = commit(fixture, node1, "clarify-notes", "澄清记录内容");
+        assertFalse(withoutInput.path("advanced").asBoolean(), "没有输入文件时不得推进");
+        assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
+
+        // ---- 再上传输入：这一次上传本身就应该把节点推下去（修复前这里什么都没有发生）----
+        JsonNode uploaded = uploadOk(fixture.token, fixture.requirementId, node1, null,
+                "客户原话.md", "客户说要分诊".getBytes(StandardCharsets.UTF_8));
+        assertTrue(uploaded.path("advanced").asBoolean(), "补传输入后上传响应应报告已自动推进");
+        assertEquals("需求拆解", uploaded.path("nextNodeName").asText());
+        assertFalse(uploaded.path("requirementCompleted").asBoolean());
+        assertTrue(uploaded.path("remainingRequiredOutputs").isArray());
+        assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId),
+                "上传必填输入后节点 1 应变为 done、节点 2 变为 current");
+        assertEquals(2, jdbcTemplate.queryForObject("SELECT current_seq FROM wb_requirement WHERE id = ?",
+                Integer.class, fixture.requirementId));
+        assertNotNull(jdbcTemplate.queryForObject("SELECT completed_at FROM wb_requirement_node WHERE id = ?",
+                LocalDateTime.class, node1), "推进时要写 completed_at");
+
+        // ---- 节点 2（fixed）：两次输出都提交，但必填输入还没传 → 不推进 ----
+        commitOk(fixture, node2, "requirement-items", "需求条目");
+        JsonNode noInput = commit(fixture, node2, "acceptance-criteria", "验收标准");
+        assertFalse(noInput.path("advanced").asBoolean());
+        assertEquals(List.of(fixture.node2InputItemId), toLongList(noInput.path("remainingRequiredInputs")));
+        // 此刻 advance-preview 也该说"还差必填输入"（与 commit 同口径）
+        mockMvc.perform(get("/api/requirements/" + fixture.requirementId + "/nodes/" + node2 + "/advance-preview")
+                        .header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ready").value(false));
+        assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId));
+
+        // ---- 补传必填固定输入：上传本身触发推进到节点 3 ----
+        JsonNode fixedUpload = uploadOk(fixture.token, fixture.requirementId, node2, fixture.node2InputItemId,
+                "客户原话整理.md", "整理后的原话".getBytes(StandardCharsets.UTF_8));
+        assertEquals(fixture.node2InputItemId, fixedUpload.path("inputItemId").asLong());
+        assertTrue(fixedUpload.path("advanced").asBoolean(), "补传必填固定输入后应自动推进");
+        assertEquals("需求确认", fixedUpload.path("nextNodeName").asText());
+        assertEquals(List.of("done", "done", "current"), jdbcStatuses(fixture.requirementId));
+        assertEquals(3, jdbcTemplate.queryForObject("SELECT current_seq FROM wb_requirement WHERE id = ?",
+                Integer.class, fixture.requirementId));
+
+        // ---- 幂等：对已经推进走的节点重复上传（在它仍是"已完成"状态时）不应再改状态 ----
+        // 这里改用"对当前节点（节点 3，free）重复上传同一输入"来验证：第二次上传不再推进任何东西——
+        // 节点 3 还没提交输出，上传只会让它离推进更近，不会把状态再往前推。
+        JsonNode node3First = uploadOk(fixture.token, fixture.requirementId, node3, null,
+                "确认之一.md", "确认一".getBytes(StandardCharsets.UTF_8));
+        assertFalse(node3First.path("advanced").asBoolean(), "输出还没提交时上传输入不能推进");
+        JsonNode node3Second = uploadOk(fixture.token, fixture.requirementId, node3, null,
+                "确认之二.md", "确认二".getBytes(StandardCharsets.UTF_8));
+        assertFalse(node3Second.path("advanced").asBoolean(), "重复上传不产生额外副作用");
+        assertEquals(List.of("done", "done", "current"), jdbcStatuses(fixture.requirementId));
+        assertEquals(3, jdbcTemplate.queryForObject("SELECT current_seq FROM wb_requirement WHERE id = ?",
+                Integer.class, fixture.requirementId));
+
+        // ---- 需求已完成之后：上传接口本身已被 409 拒绝（不再有机会推进）----
+        commitOk(fixture, node3, "confirm-summary", "确认结论");
+        assertEquals("completed", jdbcTemplate.queryForObject("SELECT status FROM wb_requirement WHERE id = ?",
+                String.class, fixture.requirementId));
+        MockMultipartFile another = new MockMultipartFile("file", "后补.md",
+                "application/octet-stream", "后补".getBytes(StandardCharsets.UTF_8));
+        mockMvc.perform(multipart("/api/requirements/" + fixture.requirementId + "/nodes/" + node3 + "/inputs")
+                        .file(another)
+                        .header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10404));
+        assertEquals(List.of("done", "done", "done"), jdbcStatuses(fixture.requirementId));
+    }
+
+    @Test
+    void deleteInput_doesNotAdvance() throws Exception {
+        Fixture fixture = prepare("dlin", true);
+        long node1 = fixture.nodes.get(0).id();
+
+        // 先提交输出（free 节点）→ 不推进；再上传一个输入 → 推进（这正是用例 3b 的路径）
+        commitOk(fixture, node1, "clarify-notes", "澄清记录");
+        JsonNode uploaded = uploadOk(fixture.token, fixture.requirementId, node1, null,
+                "客户原话.md", "客户说要分诊".getBytes(StandardCharsets.UTF_8));
+        assertTrue(uploaded.path("advanced").asBoolean());
+        assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId));
+
+        // 回到节点 2：上传一个"非必填"的输入（现场资料清单）——节点 2 的输出还没提交，
+        // 删除它时判定必然不通过（缺输出），状态不能有任何变化。
+        long node2 = fixture.nodes.get(1).id();
+        JsonNode optional = uploadOk(fixture.token, fixture.requirementId, node2, fixture.node2InputItemId,
+                "现场资料.md", "现场资料".getBytes(StandardCharsets.UTF_8));
+        assertFalse(optional.path("advanced").asBoolean());
+        mockMvc.perform(delete("/api/requirements/" + fixture.requirementId + "/nodes/" + node2 + "/inputs/"
+                        + optional.path("inputRecordId").asLong())
+                        .header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isOk());
+        assertEquals(List.of("done", "current", "waiting"), jdbcStatuses(fixture.requirementId),
+                "删除输入不应推进任何节点");
+        assertEquals(2, jdbcTemplate.queryForObject("SELECT current_seq FROM wb_requirement WHERE id = ?",
+                Integer.class, fixture.requirementId));
+    }
+
+    @Test
+    void concurrentCommitDoesNotCountUploadWhoseStreamFails() throws Exception {
+        Fixture fixture = prepare("failup", true);
+        long node = fixture.nodes.get(0).id();
+        var reading = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var executor = Executors.newSingleThreadExecutor();
+        MockMultipartFile broken = new MockMultipartFile("file", "故障.md", "text/markdown", new byte[]{1}) {
+            @Override
+            public InputStream getInputStream() {
+                return new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                        reading.countDown();
+                        try {
+                            release.await(10, TimeUnit.SECONDS);
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                        }
+                        throw new IOException("模拟读取上传流失败");
+                    }
+                };
+            }
+        };
+        try {
+            var failed = executor.submit(() -> mockMvc.perform(multipart("/api/requirements/"
+                            + fixture.requirementId + "/nodes/" + node + "/inputs").file(broken)
+                            .header("Authorization", "Bearer " + fixture.token))
+                    .andExpect(status().isBadGateway()).andExpect(jsonPath("$.code").value(19902)));
+            assertTrue(reading.await(10, TimeUnit.SECONDS));
+            // 模型提交时，上传已经开始但流还没有写完。
+            assertFalse(commit(fixture, node, "clarify-notes", "澄清记录").path("advanced").asBoolean());
+            release.countDown();
+            failed.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+        // 已有输出时再次读盘失败，也不得推进。
+        mockMvc.perform(multipart("/api/requirements/" + fixture.requirementId + "/nodes/" + node + "/inputs")
+                        .file(broken).header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isBadGateway());
+        assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
+        assertEquals(0, count("SELECT COUNT(*) FROM wb_requirement_node_input WHERE node_instance_id = ?", node));
+        assertEquals(0, count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ? AND ref_type = 'node_input'",
+                fixture.requirementId));
+        assertTrue(uploadOk(fixture.token, fixture.requirementId, node, null, "重试.md", new byte[]{1})
+                .path("advanced").asBoolean());
+    }
+
+    @Test
+    void commitIgnoresLegacyInputPlaceholder() throws Exception {
+        Fixture fixture = prepare("oldin", true);
+        long node = fixture.nodes.get(0).id();
+        JsonNode input = uploadOk(fixture.token, fixture.requirementId, node, null, "故障.md", new byte[]{1});
+        jdbcTemplate.update("UPDATE wb_file SET storage_rel_path = '' WHERE id = ?", input.path("fileId").asLong());
+        assertFalse(commit(fixture, node, "clarify-notes", "澄清记录").path("advanced").asBoolean());
+        assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
+    }
+
+    @Test
+    void occupiedOutputPathRollsBackRegistrationAndAdvance() throws Exception {
+        Fixture fixture = prepare("vfail", true);
+        long node = fixture.nodes.get(0).id();
+        uploadOk(fixture.token, fixture.requirementId, node, null, "输入.md", new byte[]{1});
+        Path target = Path.of(nodeDetailOk(fixture.token, fixture.requirementId, node).path("workspacePath").asText())
+                .resolve("outputs/1/clarify-notes.v1.md");
+        Files.createDirectories(target.getParent());
+        Files.writeString(target, "已有内容");
+        commitExpect(fixture, node, "clarify-notes", "新内容", status().isBadGateway(), 19902);
+        assertEquals("已有内容", Files.readString(target));
+        assertEquals(List.of("current", "waiting", "waiting"), jdbcStatuses(fixture.requirementId));
+        assertEquals(0, count("SELECT COUNT(*) FROM wb_requirement_node_output WHERE node_instance_id = ?", node));
+        assertEquals(0, count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ? AND ref_type = 'node_output'",
+                fixture.requirementId));
+        Files.delete(target);
+        JsonNode retry = commit(fixture, node, "clarify-notes", "新内容");
+        assertEquals(1, retry.path("versionNo").asInt());
+        assertTrue(retry.path("advanced").asBoolean());
+        assertEquals("新内容", Files.readString(target));
+    }
+
+    @Test
+    void concurrentOutputVersionsKeepLegacyAndNewContentsReadable() throws Exception {
+        Fixture fixture = prepare("vhist", true);
+        long node = fixture.nodes.get(0).id();
+        assertEquals(1, commit(fixture, node, "clarify-notes", "旧内容").path("versionNo").asInt());
+        long legacyId = nodeDetailOk(fixture.token, fixture.requirementId, node).path("outputs").get(0)
+                .path("file").path("fileId").asLong();
+        String legacyPath = "ws/" + fixture.requirementId + "/outputs/1/clarify-notes.md";
+        Files.move(storageRoot().resolve("ws/" + fixture.requirementId + "/outputs/1/clarify-notes.v1.md"),
+                storageRoot().resolve(legacyPath));
+        jdbcTemplate.update("UPDATE wb_file SET storage_rel_path = ? WHERE id = ?", legacyPath, legacyId);
+
+        var start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> {
+                assertTrue(start.await(10, TimeUnit.SECONDS));
+                return commit(fixture, node, "clarify-notes", "left.md", "并发内容甲").path("versionNo").asInt();
+            });
+            var second = executor.submit(() -> {
+                assertTrue(start.await(10, TimeUnit.SECONDS));
+                return commit(fixture, node, "clarify-notes", "right.md", "并发内容乙").path("versionNo").asInt();
+            });
+            start.countDown();
+            int left = first.get(10, TimeUnit.SECONDS);
+            int right = second.get(10, TimeUnit.SECONDS);
+            assertEquals(java.util.Set.of(2, 3), java.util.Set.of(left, right));
+            Path dir = storageRoot().resolve(legacyPath).getParent();
+            assertEquals("并发内容甲", Files.readString(dir.resolve("clarify-notes.v" + left + ".md")));
+            assertEquals("并发内容乙", Files.readString(dir.resolve("clarify-notes.v" + right + ".md")));
+            String latestContent = left == 3 ? "并发内容甲" : "并发内容乙";
+            assertEquals(3, commit(fixture, node, "clarify-notes", latestContent).path("versionNo").asInt());
+        } finally {
+            executor.shutdownNow();
+        }
+        mockMvc.perform(get("/api/files/" + legacyId + "/download").header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isOk()).andExpect(content().bytes("旧内容".getBytes(StandardCharsets.UTF_8)));
+        assertEquals(3, count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ? AND ref_type = 'node_output'",
+                fixture.requirementId));
     }
 
     // ==================================================================
@@ -607,22 +850,30 @@ class NodeApiTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value(10401));
 
-        // 节点已绑定 A：再登记会话 B → B 登记成功但不抢 defaultSessionId（AC-F7.4 的前提）
-        registerSessionOk(fixture.token, fixture.requirementId, "sess_b_" + SUFFIX, node1, "会话 B");
-        assertEquals("sess_a_" + SUFFIX,
+        // 显式新建 B 时，用 B 替换 A 成为同一节点的默认会话（AC-F7.4）。
+        JsonNode sessionB = registerSessionOk(fixture.token, fixture.requirementId,
+                "sess_b_" + SUFFIX, node1, "会话 B");
+        assertEquals("sess_b_" + SUFFIX,
                 nodeDetailOk(fixture.token, fixture.requirementId, node1).path("defaultSessionId").asText());
 
-        // 内部接口登记（免 JWT）：绑定到另一个节点 → 该节点默认会话命中它
+        // 内部接口登记显式绑定时遵守同一规则，等待中的节点只能读取。
         long node2 = fixture.nodes.get(1).id();
         mockMvc.perform(post("/internal/sessions")
                         .header("X-Internal-Token", INTERNAL_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json(Map.of("requirementId", fixture.requirementId,
-                                "dshSessionId", "sess_i_" + SUFFIX, "nodeId", node2, "title", "插件登记"))))
+                                "dshSessionId", "sess_i_" + SUFFIX, "nodeId", node2))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10404));
+        mockMvc.perform(post("/internal/sessions")
+                        .header("X-Internal-Token", INTERNAL_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json(Map.of("requirementId", fixture.requirementId,
+                                "dshSessionId", "sess_i_" + SUFFIX, "nodeId", node1, "title", "插件登记"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.dshSessionId").value("sess_i_" + SUFFIX));
         assertEquals("sess_i_" + SUFFIX,
-                nodeDetailOk(fixture.token, fixture.requirementId, node2).path("defaultSessionId").asText());
+                nodeDetailOk(fixture.token, fixture.requirementId, node1).path("defaultSessionId").asText());
         // 无令牌 → 401
         mockMvc.perform(post("/internal/sessions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -635,9 +886,9 @@ class NodeApiTest {
                         .header("Authorization", "Bearer " + fixture.token))
                 .andExpect(status().isOk()).andReturn());
         assertEquals(3, listBefore.size());
-        // 让 A 明确"最旧"再 touch
-        jdbcTemplate.update("UPDATE wb_agent_session SET last_active_at = ? WHERE dsh_session_id = ?",
-                LocalDateTime.now().minusDays(1), "sess_a_" + SUFFIX);
+        // 固定初始活跃时间，避免同毫秒登记和 touch 让排序断言依赖运行速度。
+        jdbcTemplate.update("UPDATE wb_agent_session SET last_active_at = ? WHERE requirement_id = ?",
+                LocalDateTime.now().minusDays(1), fixture.requirementId);
         mockMvc.perform(post("/api/sessions/" + sessionA.path("id").asLong() + "/touch")
                         .header("Authorization", "Bearer " + fixture.token))
                 .andExpect(status().isOk());
@@ -646,18 +897,74 @@ class NodeApiTest {
                 .andExpect(status().isOk()).andReturn());
         assertEquals("sess_a_" + SUFFIX, listAfter.get(0).path("dshSessionId").asText(),
                 "touch 之后该会话应排到最前");
-        // 非创建人 touch → 403
-        mockMvc.perform(post("/api/sessions/" + sessionA.path("id").asLong() + "/touch")
-                        .header("Authorization", "Bearer " + fixture.memberToken))
+        assertEquals("sess_i_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node1).path("defaultSessionId").asText());
+
+        String touchA = "/api/sessions/" + sessionA.path("id").asLong() + "/touch";
+        String touchB = "/api/sessions/" + sessionB.path("id").asLong() + "/touch";
+        String selectNode1 = json(Map.of("nodeId", node1));
+        String selectNode2 = json(Map.of("nodeId", node2));
+        mockMvc.perform(post(touchA).header("Authorization", "Bearer " + fixture.memberToken)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode1))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value(10202));
+        mockMvc.perform(post(touchA).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode2))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10404));
 
-        // 需求级隔离：另一个需求的会话列表看不到它们（AC-X1.1）
+        // 其他需求既看不到这些会话，也不能将其绑定到自己的节点。
         Fixture other = prepare("ss2", true);
         JsonNode otherList = readData(mockMvc.perform(get("/api/requirements/" + other.requirementId + "/sessions")
                         .header("Authorization", "Bearer " + other.token))
                 .andExpect(status().isOk()).andReturn());
         assertEquals(0, otherList.size());
+        mockMvc.perform(post(touchA).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json(Map.of("nodeId", other.nodes.get(0).id()))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(10001));
+
+        // 显式切回 A 刷新后仍是默认；旧客户端仅更新 B 活跃时间不会抢走会话选择。
+        mockMvc.perform(post(touchA).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode1))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.isNodePrimary").value(true));
+        mockMvc.perform(post(touchB).header("Authorization", "Bearer " + fixture.token))
+                .andExpect(status().isOk());
+        assertEquals("sess_a_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node1).path("defaultSessionId").asText());
+
+        uploadOk(fixture.token, fixture.requirementId, node1, null,
+                "需求.md", "客户原话".getBytes(StandardCharsets.UTF_8));
+        assertTrue(commit(fixture, node1, "clarify-notes", "澄清记录").path("advanced").asBoolean());
+        assertEquals("sess_a_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node2).path("defaultSessionId").asText());
+        mockMvc.perform(post(touchB).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode1))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10404));
+        mockMvc.perform(post(touchB).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode2))
+                .andExpect(status().isOk());
+        assertEquals("sess_b_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node2).path("defaultSessionId").asText());
+        assertEquals("sess_a_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node1).path("defaultSessionId").asText());
+        assertEquals(node2, jdbcTemplate.queryForObject("SELECT last_node_instance_id FROM wb_session_runtime_info"
+                + " WHERE agent_session_id = ?", Long.class, sessionB.path("id").asLong()));
+        assertEquals(2, count("SELECT COUNT(*) FROM wb_node_session_link WHERE agent_session_id = ?",
+                sessionB.path("id").asLong()));
+        assertEquals(3, count("SELECT COUNT(*) FROM wb_node_session_link WHERE node_instance_id = ?", node1));
+
+        // 归档后保留历史记录，默认会话回退到最近活跃的未归档会话。
+        jdbcTemplate.update("UPDATE wb_agent_session SET archived = 1 WHERE id = ?", sessionB.path("id").asLong());
+        assertEquals("sess_a_" + SUFFIX,
+                nodeDetailOk(fixture.token, fixture.requirementId, node2).path("defaultSessionId").asText());
+        mockMvc.perform(post(touchB).header("Authorization", "Bearer " + fixture.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(selectNode2))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(10404));
     }
 
     // ==================================================================
@@ -742,7 +1049,8 @@ class NodeApiTest {
         //   节点 1：输入 a.md + 输出 clarify-notes（推进到节点 2）
         //   节点 2：必填输入 b.md + 两项输出（推进到节点 3）
         //   节点 3：输入 c.md + 输出 confirm-summary（需求完成）
-        // 另有一个会话绑定在节点 1 上。
+        // 另有一个会话在节点 1 当前时登记。
+        registerSessionOk(fixture.token, fixture.requirementId, "sess_del_" + SUFFIX, node1, "要删的会话");
         uploadOk(fixture.token, fixture.requirementId, node1, null,
                 "a.md", "a".getBytes(StandardCharsets.UTF_8));
         completeNode1(fixture);
@@ -758,10 +1066,8 @@ class NodeApiTest {
         uploadOk(fixture.token, fixture.requirementId, node3, null,
                 "c.md", "c".getBytes(StandardCharsets.UTF_8));
         commitOk(fixture, node3, "confirm-summary", "确认结论");
-        registerSessionOk(fixture.token, fixture.requirementId, "sess_del_" + SUFFIX, node1, "要删的会话");
         long fileCount = count("SELECT COUNT(*) FROM wb_file WHERE requirement_id = ?", fixture.requirementId);
-        // 节点 1/2/3 各 1 个输入 + 各 1 个当前版本输出 = 6；节点 2 的两次重提交再各留 1 个旧版本
-        // （每次提交的结果都会登记下来；快照复制后模型改写源文件也不影响已登记版本的摘要）
+        // 四个输入、四个当前输出和一个历史版本。
         assertEquals(9, fileCount, "文件登记数");
         List<String> relPaths = jdbcTemplate.queryForList(
                 "SELECT storage_rel_path FROM wb_file WHERE requirement_id = ?", String.class, fixture.requirementId);
@@ -937,13 +1243,18 @@ class NodeApiTest {
      * @return 提交响应的 data
      */
     private JsonNode commit(Fixture fixture, long nodeId, String itemKey, String content) throws Exception {
+        return commit(fixture, nodeId, itemKey, itemKey + ".md", content);
+    }
+
+    private JsonNode commit(Fixture fixture, long nodeId, String itemKey, String filename, String content)
+            throws Exception {
         Path workspace = Paths.get(jdbcTemplate.queryForObject(
                 "SELECT dsh_workspace_path FROM wb_requirement WHERE id = ?", String.class, fixture.requirementId));
-        Path file = workspace.resolve(".workbench").resolve(String.valueOf(nodeId)).resolve(itemKey + ".md");
+        Path file = workspace.resolve(".workbench").resolve(String.valueOf(nodeId)).resolve(filename);
         Files.createDirectories(file.getParent());
         Files.writeString(file, content, StandardCharsets.UTF_8);
         Map<String, Object> body = new HashMap<>();
-        body.put("relativePath", ".workbench/" + nodeId + "/" + itemKey + ".md");
+        body.put("relativePath", ".workbench/" + nodeId + "/" + filename);
         body.put("sha256", sha256(file));
         body.put("operator", "agent");
         return readData(mockMvc.perform(post(commitUrl(nodeId, itemKey))

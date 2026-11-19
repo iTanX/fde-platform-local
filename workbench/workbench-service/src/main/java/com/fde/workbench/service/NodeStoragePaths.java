@@ -2,8 +2,14 @@ package com.fde.workbench.service;
 
 import com.fde.workbench.common.error.BizException;
 import com.fde.workbench.common.error.ErrorCode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -15,7 +21,7 @@ import java.util.Locale;
  * {@code <storage-root>/ws/<requirementId>}（= {@code wb_requirement.dsh_workspace_path}），其下：
  * <pre>
  * &lt;ws&gt;/inputs/&lt;nodeSeq&gt;/&lt;fileId&gt;_&lt;原始文件名&gt;   节点输入（用户上传）
- * &lt;ws&gt;/outputs/&lt;nodeSeq&gt;/&lt;itemKey&gt;.&lt;ext&gt;      已登记的输出副本（下载 / 预览读这里）
+ * &lt;ws&gt;/outputs/&lt;nodeSeq&gt;/&lt;itemKey&gt;.v&lt;N&gt;.&lt;ext&gt;  已登记的输出副本（下载 / 预览读这里）
  * &lt;ws&gt;/.workbench/&lt;nodeInstanceId&gt;/...          模型实际写入的目录（唯一允许的落盘位置）
  * </pre>
  * <b>为什么输出目录是 {@code <ws>/.workbench/<nodeInstanceId>/} 而不是 docs 里写的
@@ -31,6 +37,8 @@ import java.util.Locale;
  */
 @Component
 public class NodeStoragePaths {
+
+    private static final Logger log = LoggerFactory.getLogger(NodeStoragePaths.class);
 
     /** 模型输出目录名（相对 workspace 根） */
     public static final String MODEL_DIR = ".workbench";
@@ -102,17 +110,38 @@ public class NodeStoragePaths {
     }
 
     /**
-     * 已登记输出副本的路径：{@code <ws>/outputs/<nodeSeq>/<itemKey>.<ext>}。
-     *
-     * @param workspace 需求 workspace 目录
-     * @param nodeSeq   节点 seq
-     * @param itemKey   输出项稳定键（已校验）
-     * @param extension 扩展名（不含点）
-     * @return 目录（不创建）
+     * 新登记输出副本的路径。已有版本仍按数据库记录的路径读取。
      */
-    public Path outputCopyPath(Path workspace, Integer nodeSeq, String itemKey, String extension) {
-        String relative = OUTPUTS_DIR + "/" + nodeSeq + "/" + itemKey + "." + extension;
+    public Path outputCopyPath(Path workspace, Integer nodeSeq, String itemKey, int versionNo, String extension) {
+        String relative = OUTPUTS_DIR + "/" + nodeSeq + "/" + itemKey + ".v" + versionNo + "." + extension;
         return requireInside(storage.resolveWithin(workspace, relative), workspace, relative);
+    }
+
+    /** 同目录硬链接一次性发布完整文件，若目标已存在则保留原文件。 */
+    void publishStagedFile(Path staged, Path target) {
+        try {
+            Files.createLink(target, staged);
+        } catch (IOException | UnsupportedOperationException ex) {
+            log.error("发布节点文件失败：{}", target, ex);
+            throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "文件写入失败：" + target.getFileName());
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                // 只有明确回滚才删除此次发布的文件，提交结果未知时保留以免丢失已登记的内容。
+                if (status == STATUS_ROLLED_BACK) {
+                    deleteQuietly(target);
+                }
+            }
+        });
+    }
+
+    void deleteQuietly(Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ex) {
+            log.warn("清理节点文件失败：{}", path, ex);
+        }
     }
 
     /**

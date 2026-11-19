@@ -15,14 +15,14 @@ package com.fde.workbench;
  * （Spring Boot 只取第一个同名资源），JWT / multipart 等配置会全部丢失；
  * {@code @SpringBootTest#properties} 只覆盖单键，最稳。
  * <p>
- * 已经过验证：每个用例类的上下文都以本连接串启动（见各自 {@code @SpringBootTest} 注解）。
+ * {@code FDE_TEST_DB_URL} 可指定独立的临时测试库，应提供包含会话时区参数的完整 JDBC URL。
  */
 final class TestDatabases {
 
-    /** 独立测试库连接串（与会话时区等参数与主配置一致，只有库名不同） */
-    static final String URL = "jdbc:mysql://192.168.2.125:3306/fde_workbench_test"
+    /** Spring 启动测试上下文时解析占位符，测试注解仍可引用编译期常量。 */
+    static final String URL = "${FDE_TEST_DB_URL:jdbc:mysql://192.168.2.125:3306/fde_workbench_test"
             + "?sessionVariables=time_zone='%2B08:00'&serverTimezone=Asia/Shanghai&useUnicode=true"
-            + "&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true";
+            + "&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true}";
 
     private TestDatabases() {
     }

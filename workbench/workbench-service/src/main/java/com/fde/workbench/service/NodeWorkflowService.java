@@ -28,6 +28,8 @@ import com.fde.workbench.service.vo.RequirementNodeVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
@@ -35,16 +37,15 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.UUID;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * 节点信息、输入上传 / 删除、节点上下文与引用登记（docs/api.md §8、§11 context/reference；
@@ -72,9 +73,6 @@ public class NodeWorkflowService {
 
     /** 原始文件名截断到该长度以下（给 fileId 前缀留出余量） */
     private static final int MAX_SAFE_FILE_NAME_LENGTH = 200;
-
-    /** 占位摘要（落盘前 {@code wb_file.sha256} 是 NOT NULL，先用全 0 占位，写完立刻回填） */
-    private static final String ZERO_SHA256 = "0".repeat(64);
 
     /** 上下文 / 快照解析用的 Jackson 视图：忽略未知字段，让旧快照在新字段加入后仍可读 */
     private static final TypeReference<List<NodeSnapshots.InputItem>> INPUT_ITEMS =
@@ -111,6 +109,8 @@ public class NodeWorkflowService {
 
     private final SessionService sessionService;
 
+    private final SkillService skillService;
+
     private final WorkbenchStorageProperties properties;
 
     private final TransactionTemplate transactionTemplate;
@@ -129,6 +129,7 @@ public class NodeWorkflowService {
                                FileDigestService fileDigestService,
                                NodeAdvanceEvaluator advanceEvaluator,
                                SessionService sessionService,
+                               SkillService skillService,
                                WorkbenchStorageProperties properties,
                                TransactionTemplate transactionTemplate,
                                ObjectMapper objectMapper) {
@@ -143,6 +144,7 @@ public class NodeWorkflowService {
         this.fileDigestService = fileDigestService;
         this.advanceEvaluator = advanceEvaluator;
         this.sessionService = sessionService;
+        this.skillService = skillService;
         this.properties = properties;
         this.transactionTemplate = transactionTemplate;
         // 解析快照时忽略未知字段：快照是历史数据，后续 record 加字段不能让读取方 500
@@ -179,7 +181,8 @@ public class NodeWorkflowService {
 
         return new RequirementNodeVO(node.getId(), node.getSeq(), node.getName(), node.getDescription(),
                 node.getStatus(), node.getInputType(), skills, inputs, outputs, previousNode,
-                access.readonly(), defaultSessionId);
+                access.readonly(), defaultSessionId,
+                access.readonly() ? null : access.requirement().getDshWorkspacePath());
     }
 
     /**
@@ -306,21 +309,8 @@ public class NodeWorkflowService {
     /**
      * 上传节点输入（权限 C，且节点为当前节点、需求进行中）。
      * <p>
-     * 事务边界（与 {@code SkillService} 同一套思路）：
-     * <ol>
-     *   <li>校验 + 落盘（写临时文件、算 sha256、原子 move 到 {@code inputs/<seq>/<fileId>_<原名>}）
-     *       放在事务<b>外</b>：磁盘操作可能很慢，不该占着数据库连接；</li>
-     *   <li>短事务内只做"插 {@code wb_file} → 插 {@code wb_requirement_node_input} → 回填 {@code ref_id}"；</li>
-     *   <li>事务失败时删掉刚落的文件（{@link #deleteFileQuietly}），避免孤儿文件。</li>
-     * </ol>
-     * <b>为什么必须知道 fileId 才能落盘</b>：文件名前缀就是 {@code fileId}（docs/database.md §5.5），
-     * 而 fileId 要插入 {@code wb_file} 才有。因此先插一行"占位文件"（路径列写最终路径）拿到 ID、
-     * 落盘成功后再在同一事务里把它补成正式记录？
-     * ——不这么做：那样会出现"事务未提交但磁盘已有文件"的窗口，且占位行会被别的事务看到。
-     * 这里的做法是<b>先查一次自增值不可行</b>（MySQL 5.7 无 sequence），所以改为：
-     * 文件名前缀用"临时 UUID"，插入 {@code wb_file} 拿到 ID 后在同一事务内 rename 成
-     * {@code <fileId>_<原名>}，路径列写最终路径；rename 放在事务提交<b>之前</b>的 finally 里失败即回滚。
-     * 实际上 {@link #uploadInternal} 把整个流程包在一次事务里，磁盘与数据库同生共死。
+     * 上传流先写入同目录的临时文件。落盘成功后，事务内取得 fileId、发布正式文件、
+     * 完成数据库登记并判定是否推进。文件行在提交前对其他请求不可见。
      *
      * @param requirementId 需求 ID
      * @param nodeId        节点实例 ID
@@ -352,49 +342,27 @@ public class NodeWorkflowService {
      */
     public void deleteInput(Long requirementId, Long nodeId, Long inputRecordId) {
         NodeAccess access = requireOperableCurrentNode(requirementId, nodeId);
-        NodeInputFile input = inputRecordId == null ? null : nodeInputMapper.selectById(inputRecordId);
-        if (input == null || !Objects.equals(input.getNodeInstanceId(), access.node().getId())) {
-            throw BizException.of(ErrorCode.NOT_FOUND, "输入文件不存在");
-        }
-        FileRecord file = fileMapper.selectById(input.getFileId());
         transactionTemplate.executeWithoutResult(status -> {
-            if (nodeInputMapper.deleteById(input.getId(), access.node().getId(), input.getFileId()) != 1) {
-                // 并发删除：别人先删掉了，按"已不存在"处理（事务内抛出会回滚，这里没有其它写入）
+            Requirement requirement = lockRequirement(requirementId);
+            requireCurrentNode(requirement, requireNodeOfRequirement(requirement, nodeId));
+            NodeInputFile input = inputRecordId == null ? null : nodeInputMapper.selectById(inputRecordId);
+            if (input == null || !Objects.equals(input.getNodeInstanceId(), access.node().getId())) {
                 throw BizException.of(ErrorCode.NOT_FOUND, "输入文件不存在");
             }
-            if (file != null) {
-                fileMapper.deleteById(file.getId());
+            if (nodeInputMapper.deleteById(input.getId(), nodeId, input.getFileId()) != 1) {
+                throw BizException.of(ErrorCode.NOT_FOUND, "输入文件不存在");
             }
+            fileMapper.deleteById(input.getFileId());
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            deleteFileQuietly(input.getStorageRelPath());
+                        }
+                    });
         });
-        if (file != null) {
-            deleteFileQuietly(file.getStorageRelPath());
-        }
-        log.info("删除节点输入：requirementId={}, nodeId={}, inputRecordId={}, fileId={}",
-                requirementId, nodeId, inputRecordId, input.getFileId());
     }
 
-    /**
-     * 上传主体。
-     * <p>
-     * <b>事务边界（与 {@code SkillService} 同一套思路，但文件命名要求"必须知道 fileId"）</b>：
-     * <ol>
-     *   <li>先在<b>短事务内</b>插入 {@code wb_file} 与 {@code wb_requirement_node_input}，
-     *       拿到 fileId / inputRecordId 并回填 {@code ref_id}；</li>
-     *   <li>事务提交后再落盘：{@code inputs/<seq>/<fileId>_<原名>}（临时文件 + 原子 rename）；</li>
-     *   <li>落盘成功 → 在一个只更新一列的短事务里回填 {@code storage_rel_path}；</li>
-     *   <li>落盘失败 → 删除刚插入的两行（补偿事务）并抛出原来的异常，页面上不会出现"登记了但没文件"。</li>
-     * </ol>
-     * 反过来的顺序（先落盘再登记）需要先把文件名里的 fileId 留空、提交后再 rename，
-     * 中间会有一段"文件已在正式位置、数据库还没说它属于谁"的窗口；当前顺序的窗口只有"文件还没写"，
-     * 而读取方（下载 / 预览）发现的只会是 404，不会读到别人的内容。
-     *
-     * @param access       已校验的节点访问
-     * @param inputItemId  固定输入项 ID，可空
-     * @param originalName 原始文件名
-     * @param in           文件流
-     * @param userId       上传人
-     * @return 上传结果
-     */
     private NodeInputUploadVO uploadInternal(NodeAccess access, Long inputItemId, String originalName,
                                              InputStream in, Long userId) {
         RequirementNode node = access.node();
@@ -412,69 +380,53 @@ public class NodeWorkflowService {
         storage.createDirWithin(inputDir);
         storage.requireNoSymlink(inputDir);
 
-        // ① 短事务：先登记（占位路径），拿到 fileId 后才能命名文件
-        LocalDateTime now = now();
-        UploadHandle handle = transactionTemplate.execute(status -> {
-            FileRecord record = new FileRecord();
-            record.setProjectId(access.requirement().getProjectId());
-            record.setRequirementId(access.requirement().getId());
-            record.setRefType(FileRecord.REF_TYPE_NODE_INPUT);
-            record.setOriginalName(safeName);
-            record.setStorageRelPath("");
-            record.setMimeType(probeContentType(safeName));
-            // 真实大小与摘要落盘后再回填；先写 0 是为了让 NOT NULL 列有合法的初值
-            record.setSizeBytes(0L);
-            record.setSha256(ZERO_SHA256);
-            record.setUploadedBy(userId);
-            record.setCreatedAt(now);
-            fileMapper.insert(record);
-
-            NodeInputFile input = new NodeInputFile();
-            input.setNodeInstanceId(node.getId());
-            input.setInputItemId(itemId);
-            input.setFileId(record.getId());
-            input.setUploadedBy(userId);
-            input.setCreatedAt(now);
-            nodeInputMapper.insert(input);
-            fileMapper.updateRef(record.getId(), FileRecord.REF_TYPE_NODE_INPUT, input.getId());
-            return new UploadHandle(record.getId(), input.getId());
-        });
-
-        // ② 落盘（事务外）：临时文件 + 原子 rename，边写边算 sha256
-        Path finalFile = nodeStoragePaths.inputFilePath(workspace, node.getSeq(), handle.fileId(), safeName);
-        Path tempFile = inputDir.resolve(".uploading-" + UUID.randomUUID());
-        FileDigestService.WriteResult written;
+        Path staged = inputDir.resolve(".uploading-" + UUID.randomUUID());
         try {
-            written = fileDigestService.writeAtomically(in, tempFile, properties.getMaxUploadBytes());
-            Files.move(tempFile, finalFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (RuntimeException | IOException ex) {
-            deleteQuietly(tempFile);
-            deleteQuietly(finalFile);
-            // ③ 补偿：磁盘失败就把刚登记的记录撤掉，避免"页面有文件、点下载 404"
-            try {
-                transactionTemplate.executeWithoutResult(status -> {
-                    nodeInputMapper.deleteById(handle.inputRecordId(), node.getId(), handle.fileId());
-                    fileMapper.deleteById(handle.fileId());
-                });
-            } catch (RuntimeException cleanupEx) {
-                log.error("上传失败后清理登记记录也失败：fileId={}", handle.fileId(), cleanupEx);
-            }
-            if (ex instanceof BizException biz) {
-                throw biz;
-            }
-            log.error("上传节点输入落盘失败：requirementId={}, nodeId={}",
-                    access.requirement().getId(), node.getId(), ex);
-            throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "文件存储失败");
-        }
+            FileDigestService.WriteResult written = fileDigestService.writeAtomically(in, staged,
+                    properties.getMaxUploadBytes());
+            return transactionTemplate.execute(status -> {
+                Requirement requirement = lockRequirement(access.requirement().getId());
+                RequirementNode current = requireNodeOfRequirement(requirement, node.getId());
+                requireCurrentNode(requirement, current);
+                LocalDateTime now = now();
+                FileRecord record = new FileRecord();
+                record.setProjectId(requirement.getProjectId());
+                record.setRequirementId(requirement.getId());
+                record.setRefType(FileRecord.REF_TYPE_NODE_INPUT);
+                record.setOriginalName(safeName);
+                record.setStorageRelPath(""); // 自增 ID 用于生成正式文件名，占位行不会提交。
+                record.setMimeType(probeContentType(safeName));
+                record.setSizeBytes(written.bytes());
+                record.setSha256(written.sha256());
+                record.setUploadedBy(userId);
+                record.setCreatedAt(now);
+                fileMapper.insert(record);
 
-        // ④ 回填真实路径 / 大小 / 摘要（单条 UPDATE，天然原子）
-        String relativePath = storage.relativize(finalFile);
-        fileMapper.updateStoredFile(handle.fileId(), relativePath, written.bytes(), written.sha256());
-        log.info("上传节点输入：requirementId={}, nodeId={}, fileId={}, inputRecordId={}, itemId={}, bytes={}",
-                access.requirement().getId(), node.getId(), handle.fileId(), handle.inputRecordId(), itemId,
-                written.bytes());
-        return new NodeInputUploadVO(handle.fileId(), safeName, written.bytes(), handle.inputRecordId(), itemId,
-                NodeInputUploadVO.toOffset(now));
+                Path target = nodeStoragePaths.inputFilePath(workspace, node.getSeq(), record.getId(), safeName);
+                nodeStoragePaths.publishStagedFile(staged, target);
+                if (fileMapper.updateStoredFile(record.getId(), storage.relativize(target),
+                        written.bytes(), written.sha256()) != 1) {
+                    throw BizException.of(ErrorCode.INTERNAL_ERROR, "输入文件登记失败");
+                }
+                NodeInputFile input = new NodeInputFile();
+                input.setNodeInstanceId(node.getId());
+                input.setInputItemId(itemId);
+                input.setFileId(record.getId());
+                input.setUploadedBy(userId);
+                input.setCreatedAt(now);
+                nodeInputMapper.insert(input);
+                if (fileMapper.updateRef(record.getId(), FileRecord.REF_TYPE_NODE_INPUT, input.getId()) != 1) {
+                    throw BizException.of(ErrorCode.INTERNAL_ERROR, "输入文件引用登记失败");
+                }
+                // 先完成正式文件和关联记录，再读取本事务写入的输入做推进判定。
+                var advance = advanceEvaluator.evaluateAndAdvance(requirement, current, snapshot, now);
+                return new NodeInputUploadVO(record.getId(), safeName, written.bytes(), input.getId(), itemId,
+                        NodeInputUploadVO.toOffset(now), advance.advanced(), advance.nextNodeName(),
+                        advance.completed(), advance.remainingOutputs(), advance.remainingInputs());
+            });
+        } finally {
+            nodeStoragePaths.deleteQuietly(staged);
+        }
     }
 
     /**
@@ -598,6 +550,28 @@ public class NodeWorkflowService {
                 requirement.getStatus(), requirement.getDshWorkspacePath(), node.getSeq(), nodes.size(),
                 node.getName(), node.getDescription(), node.getStatus(), node.getInputType(), readonly,
                 skills, inputItems, freeFiles, outputs, previous, outputDir, nextNodeName);
+    }
+
+    /** 供 Host 按配置顺序读取当前节点某一项技能的固定版本。 */
+    public SkillService.SkillFileContent currentSkillEntry(Long requirementId, Long nodeInstanceId,
+                                                           int position, int versionNo) {
+        RequirementWithStats requirement = requireExistingRequirement(requirementId);
+        RequirementNode node = requireNodeOfRequirement(requirement, nodeInstanceId);
+        if (!Requirement.STATUS_IN_PROGRESS.equals(requirement.getStatus())
+                || !RequirementNode.STATUS_CURRENT.equals(node.getStatus())
+                || !Objects.equals(requirement.getCurrentSeq(), node.getSeq())) {
+            throw BizException.of(ErrorCode.STATE_NOT_ALLOWED, "只有需求当前节点的技能可供模型加载");
+        }
+        // 模型传入的是节点内一基序号，实际技能 ID 与版本 ID 只能来自节点快照。
+        List<NodeSnapshots.SkillItem> skills = resolveSnapshot(node).skills();
+        if (position <= 0 || position > skills.size() || versionNo <= 0) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "节点没有对应的技能快照");
+        }
+        NodeSnapshots.SkillItem snapshot = skills.get(position - 1);
+        if (!Objects.equals(snapshot.versionNo(), versionNo)) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "请求版本与节点技能快照不一致");
+        }
+        return skillService.readSnapshotEntry(requirement.getProjectId(), snapshot);
     }
 
     /**
@@ -807,13 +781,25 @@ public class NodeWorkflowService {
      */
     private NodeAccess requireOperableCurrentNode(Long requirementId, Long nodeId) {
         NodeAccess access = requireOperableAccess(requirementId, nodeId);
-        if (!Requirement.STATUS_IN_PROGRESS.equals(access.requirement().getStatus())) {
+        requireCurrentNode(access.requirement(), access.node());
+        return access;
+    }
+
+    private static void requireCurrentNode(Requirement requirement, RequirementNode node) {
+        if (!Requirement.STATUS_IN_PROGRESS.equals(requirement.getStatus())) {
             throw BizException.of(ErrorCode.STATE_NOT_ALLOWED, "需求已完成，不能再修改节点输入");
         }
-        if (!RequirementNode.STATUS_CURRENT.equals(access.node().getStatus())) {
+        if (!RequirementNode.STATUS_CURRENT.equals(node.getStatus())) {
             throw BizException.of(ErrorCode.STATE_NOT_ALLOWED, "只有当前节点可以上传或删除输入");
         }
-        return access;
+    }
+
+    Requirement lockRequirement(Long requirementId) {
+        Requirement requirement = requirementMapper.selectByIdForUpdate(requirementId);
+        if (requirement == null) {
+            throw BizException.of(ErrorCode.NOT_FOUND, "需求不存在");
+        }
+        return requirement;
     }
 
     private RequirementWithStats requireExistingRequirement(Long requirementId) {
@@ -825,7 +811,7 @@ public class NodeWorkflowService {
         return requirement;
     }
 
-    private RequirementNode requireNodeOfRequirement(RequirementWithStats requirement, Long nodeId) {
+    RequirementNode requireNodeOfRequirement(Requirement requirement, Long nodeId) {
         RequirementNode node = nodeId == null ? null : requirementMapper.selectNodeById(nodeId);
         if (node == null || !Objects.equals(node.getRequirementId(), requirement.getId())) {
             throw BizException.of(ErrorCode.NOT_FOUND, "节点不存在");
@@ -955,16 +941,6 @@ public class NodeWorkflowService {
         }
     }
 
-    /** 同目录原子移动（临时文件 → 正式名） */
-    private static void moveAtomically(Path source, Path target) {
-        try {
-            Files.move(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException ex) {
-            throw BizException.of(ErrorCode.DOWNSTREAM_UNAVAILABLE, "文件写入失败：" + target.getFileName());
-        }
-    }
-
     /** 按库中相对路径删磁盘文件（提交后清理用；失败只记日志） */
     void deleteFileQuietly(String storageRelPath) {
         if (storageRelPath == null || storageRelPath.isBlank()) {
@@ -977,14 +953,6 @@ public class NodeWorkflowService {
             }
         } catch (IOException | BizException ex) {
             log.warn("清理文件失败（可忽略，按留存策略保留）：{}", storageRelPath);
-        }
-    }
-
-    private static void deleteQuietly(Path path) {
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException ignored) {
-            // 清理失败不影响主流程
         }
     }
 
@@ -1001,15 +969,6 @@ public class NodeWorkflowService {
      * @param readonly    该节点对当前用户是否只读
      */
     record NodeAccess(RequirementWithStats requirement, RequirementNode node, boolean readonly) {
-    }
-
-    /**
-     * 上传第一步的结果：文件行与输入记录的 ID（落盘要按 fileId 命名，回填要按 inputRecordId 定位）。
-     *
-     * @param fileId        文件 ID
-     * @param inputRecordId 输入记录 ID
-     */
-    private record UploadHandle(Long fileId, Long inputRecordId) {
     }
 
     /**

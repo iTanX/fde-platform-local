@@ -15,7 +15,7 @@ import java.time.OffsetDateTime;
  * @param title         会话标题，可空
  * @param lastActiveAt  最近活跃时间（列表按它倒序）
  * @param archived      是否已归档（归档后不再作为默认会话，但仍可查看）
- * @param isNodePrimary 是否是当前节点的默认会话（前端可据此高亮）
+ * @param isNodePrimary 是否被需求内某个节点记录为默认会话
  */
 public record SessionVO(
         Long id,

@@ -375,9 +375,9 @@ public class WorkflowService {
      * <ol>
      *   <li>权限（C）+ revision 必填；</li>
      *   <li>把请求体规整成"合法节点列表"：逐个节点做全部校验（schema / 名称 / 输出项 / itemKey /
-     *       fixed 输入项 / 技能归属），任一失败整体 400/10001，错误文案带上"第 N 个节点『名称』的哪一项"；</li>
+     *       fixed 输入项），任一失败整体 400/10001，错误文案带上"第 N 个节点『名称』的哪一项"；</li>
      *   <li>{@code nodeId} 若给了，必须属于本流程，否则 400/10001（防止把别的流程的节点"搬"进来）；</li>
-     *   <li>开事务：新增节点 / 更新已有节点 → 整表重建技能关联、输入项、输出项 → seq 重排（三步法）
+     *   <li>开事务：锁定并校验技能 → 新增节点 / 更新已有节点 → 整表重建技能关联、输入项、输出项 → seq 重排（三步法）
      *       → 删除请求里不存在的节点（先删子表再删节点）→ 推进流程 updated_at；</li>
      *   <li>事务返回后重新读详情，返回与 GET 详情完全一致的结构。</li>
      * </ol>
@@ -397,11 +397,11 @@ public class WorkflowService {
         LocalDateTime stamp = nextStamp(expected);
         // ① 规整 + 校验（只读，不产生任何写入）
         List<PreparedNode> prepared = prepareNodes(workflowId, command.nodes());
-        // ② 技能归属校验：一次取出本项目全部可见技能，避免逐条查库
-        validateSkills(workflow.getProjectId(), prepared);
-
-        // ③ 事务：所有写入要么全成、要么全不成
-        transactionTemplate.executeWithoutResult(status -> persistNodes(workflowId, prepared, expected, stamp));
+        // 锁定本次引用的技能直到流程提交，避免校验后提交已删除技能的引用。
+        transactionTemplate.executeWithoutResult(status -> {
+            validateSkills(workflow.getProjectId(), prepared);
+            persistNodes(workflowId, prepared, expected, stamp);
+        });
 
         // 重读一次：revision 必须是库里刚刚写入的那个值（不能拿请求里的 stamp 凑）
         return WorkflowVO.of(requireExistingWorkflow(workflowId), loadNodes(workflowId));
@@ -569,20 +569,18 @@ public class WorkflowService {
     }
 
     /**
-     * 规则 4：技能必须属于本项目且未被逻辑删除。
-     * <p>
-     * 判定基准取 {@link SkillMapper#selectByProject}（已过滤 {@code deleted=0}，与原 {@link SkillMapper#selectById}
-     * 的"排除逻辑删除"口径一致），因此"不在返回集合里"同时覆盖"跨项目"与"已删除"两种情况：
-     * 两者对用户都是"不能用作节点技能"，合并成一条文案即可，不必再按 id 查一次去区分。
-     * 一次查询拿到本项目全部技能，而不是每个 skillId 查一次，避免节点多、技能多时的 N+1。
+     * 在保存事务内批量锁定节点引用的活跃技能，并检查它们归属于本项目。
      *
      * @param projectId 项目 ID
      * @param prepared  规整后的节点
      * @throws BizException 400/10001
      */
     private void validateSkills(Long projectId, List<PreparedNode> prepared) {
-        Set<Long> projectSkillIds = new HashSet<>();
-        skillMapper.selectByProject(projectId).forEach(skill -> projectSkillIds.add(skill.getId()));
+        List<Long> skillIds = prepared.stream().flatMap(node -> node.skillIds().stream()).distinct().sorted().toList();
+        if (skillIds.isEmpty()) {
+            return;
+        }
+        Set<Long> projectSkillIds = new HashSet<>(skillMapper.lockActiveSkillsForReference(projectId, skillIds));
 
         for (PreparedNode node : prepared) {
             for (Long skillId : node.skillIds()) {

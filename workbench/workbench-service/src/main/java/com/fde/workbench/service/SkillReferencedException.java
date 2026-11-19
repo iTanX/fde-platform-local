@@ -8,7 +8,7 @@ import com.fde.workbench.service.vo.SkillReferencesVO;
 import java.util.List;
 
 /**
- * "技能被未完成需求引用，不能删除"异常（409/10403）。
+ * 技能被活跃流程模板或未完成需求引用时的异常（409/10403）。
  * <p>
  * 为什么单独建一个异常类而不是直接抛带文案的 {@link BizException}：
  * api.md §5 要求 10403 的 {@code data} 返回引用清单 {@code {references: [...]}}，
@@ -20,11 +20,11 @@ public class SkillReferencedException extends BizException {
 
     private static final long serialVersionUID = 1L;
 
-    /** 引用清单（需求 + 节点），直接作为响应的 data */
+    /** 流程模板节点及需求快照的引用清单，直接作为响应的 data */
     private final transient SkillReferencesVO references;
 
     private SkillReferencedException(SkillReferencesVO references) {
-        super(ErrorCode.REFERENCED, "技能仍被未完成的需求引用，无法删除");
+        super(ErrorCode.REFERENCED, "技能仍被活跃流程或未完成需求引用，无法删除");
         this.references = references;
     }
 

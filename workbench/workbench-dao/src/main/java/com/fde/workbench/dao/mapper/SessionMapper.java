@@ -27,16 +27,16 @@ public interface SessionMapper {
     int insertSession(AgentSession session);
 
     /**
-     * 插入会话运行信息（{@code uk_session_runtime_session} 保证一个会话一行）。
+     * 写入会话最后所在的节点，已登记的会话保留其余运行信息。
      *
      * @param agentSessionId     会话 ID
      * @param lastNodeInstanceId 最后所在节点，可空
      * @param now                时间
      * @return 影响行数
      */
-    int insertRuntimeInfo(@Param("agentSessionId") Long agentSessionId,
-                          @Param("lastNodeInstanceId") Long lastNodeInstanceId,
-                          @Param("now") LocalDateTime now);
+    int saveRuntimeNode(@Param("agentSessionId") Long agentSessionId,
+                        @Param("lastNodeInstanceId") Long lastNodeInstanceId,
+                        @Param("now") LocalDateTime now);
 
     /**
      * 插入节点与会话的弱关联（已存在则忽略：同一会话在同一节点重复登记不应报错）。

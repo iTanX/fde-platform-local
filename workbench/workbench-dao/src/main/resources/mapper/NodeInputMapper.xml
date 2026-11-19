@@ -27,7 +27,15 @@
         SELECT i.id, i.node_instance_id, i.input_item_id, i.file_id, i.uploaded_by, i.created_at,
                f.original_name, f.size_bytes, f.sha256, f.storage_rel_path
           FROM wb_requirement_node_input i
-          JOIN wb_file f ON f.id = i.file_id
+          JOIN wb_file f ON f.id = i.file_id AND f.storage_rel_path != ''
+    </sql>
+
+    <!-- 兼容旧上传流程留下的占位行，空存储路径不算已上传。 -->
+    <sql id="StoredInputCount">
+        SELECT COUNT(*)
+          FROM wb_requirement_node_input i
+          JOIN wb_file f ON f.id = i.file_id AND f.storage_rel_path != ''
+         WHERE i.node_instance_id = #{nodeInstanceId}
     </sql>
 
     <insert id="insert" parameterType="com.fde.workbench.dao.entity.NodeInputFile"
@@ -48,16 +56,13 @@
     </select>
 
     <select id="countByNode" resultType="int">
-        SELECT COUNT(*)
-          FROM wb_requirement_node_input
-         WHERE node_instance_id = #{nodeInstanceId}
+        <include refid="StoredInputCount"/>
+           AND i.input_item_id IS NULL
     </select>
 
     <select id="countByNodeAndItem" resultType="int">
-        SELECT COUNT(*)
-          FROM wb_requirement_node_input
-         WHERE node_instance_id = #{nodeInstanceId}
-           AND input_item_id = #{inputItemId}
+        <include refid="StoredInputCount"/>
+           AND i.input_item_id = #{inputItemId}
     </select>
 
     <!-- 三列一起限定：即使拿到别人的记录 ID，也删不掉别人节点下的数据 -->

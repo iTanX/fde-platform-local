@@ -33,6 +33,7 @@ import java.util.List;
  * @param previousNode     上一节点输出，可空
  * @param readonly         是否只读（非当前节点 / 非需求创建人且非 owner / 需求已完成）
  * @param defaultSessionId 默认会话 DSH 标识，解析不到为 null
+ * @param workspacePath    可操作节点所属需求的工作区绝对路径，只读时为 null
  */
 public record RequirementNodeVO(
         Long id,
@@ -46,7 +47,8 @@ public record RequirementNodeVO(
         List<OutputVO> outputs,
         PreviousNodeVO previousNode,
         Boolean readonly,
-        String defaultSessionId) {
+        String defaultSessionId,
+        String workspacePath) {
 
     /**
      * 节点技能。

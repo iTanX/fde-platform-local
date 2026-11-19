@@ -25,6 +25,7 @@ import java.util.List;
  * @param previousNode     上一节点输出，可空
  * @param readonly         是否只读
  * @param defaultSessionId 默认会话 DSH 标识，可空
+ * @param workspacePath    可操作节点所属需求的工作区绝对路径，只读时为 null
  */
 public record RequirementNodeVO(
         Long id,
@@ -38,7 +39,8 @@ public record RequirementNodeVO(
         List<OutputVO> outputs,
         PreviousNodeVO previousNode,
         Boolean readonly,
-        String defaultSessionId) {
+        String defaultSessionId,
+        String workspacePath) {
 
     /**
      * 节点技能。
@@ -155,7 +157,7 @@ public record RequirementNodeVO(
                         .toList());
         return new RequirementNodeVO(source.id(), source.seq(), source.name(), source.description(),
                 source.status(), source.inputType(), skills, inputs, outputs, previous, source.readonly(),
-                source.defaultSessionId());
+                source.defaultSessionId(), source.workspacePath());
     }
 
     private static FileVO toFile(com.fde.workbench.service.vo.RequirementNodeVO.FileVO file) {
