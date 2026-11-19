@@ -77,16 +77,19 @@ export interface Settings {
 }
 
 /**
- * 把用户配置收敛成运行时值。
+ * 独立启动时优先使用非空的 FDE 环境变量，其余值从插件配置和默认值读取。
  * @param config - 插件配置（可能全空）
  * @param fallbackStorageRoot - 未配 `storageRoot` 时的推导值（见 index.ts：按会话 cwd 反推）
  * @returns 解析后的配置
  * @throws TypeError 数值非法
  */
 export function resolveSettings(config: Config, fallbackStorageRoot: string): Settings {
-  const javaBaseUrl = (config.javaBaseUrl ?? DEFAULT_JAVA_BASE_URL).trim().replace(/\/+$/, '')
-  const internalToken = (config.internalToken ?? '').trim()
-  const storageRoot = (config.storageRoot ?? '').trim()
+  const javaBaseUrl = (process.env.FDE_JAVA_BASE_URL?.trim() || (config.javaBaseUrl ?? DEFAULT_JAVA_BASE_URL).trim())
+    .replace(/\/+$/, '')
+  // Java 后端按字节比对令牌，启动环境提供的值保留原样。
+  const envToken = process.env.FDE_INTERNAL_TOKEN
+  const internalToken = envToken !== undefined && envToken.trim() ? envToken : (config.internalToken ?? '').trim()
+  const storageRoot = process.env.FDE_STORAGE_ROOT?.trim() || (config.storageRoot ?? '').trim()
   const maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
   const maxReferenceBytes = config.maxReferenceBytes ?? DEFAULT_MAX_REFERENCE_BYTES
   assertPositive('maxOutputBytes', maxOutputBytes)

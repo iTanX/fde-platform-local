@@ -43,5 +43,13 @@
   "scripts": {
     "build": "bash scripts/build.sh"
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
   "license": "UNLICENSED"
 }

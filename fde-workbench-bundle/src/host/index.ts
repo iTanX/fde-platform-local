@@ -62,8 +62,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (installedRoots.has(root)) return
     installedRoots.add(root)
   }
-  // storageRoot 兜底：未配置时按进程 cwd 推导（cwd 形如 `<storageRoot>/ws/<id>`），
-  // 让"忘了配置"不至于直接把工具打死；显式配置永远优先。
+  // 环境变量和插件配置都未提供 storageRoot 时，从进程 cwd（如 `<storageRoot>/ws/<id>`）推导。
   validateConfig(config)
   const settings: Settings = resolveSettings(config, defaultStorageRoot())
   if (settings.internalToken.length === 0) {
