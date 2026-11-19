@@ -48,7 +48,7 @@ fde-platform-local/
 > `runtime/dsh` 是**自包含**的 dsh 安装目录：`apps/cli/lib/bin.js` 启动器 + 所有依赖包的 `lib/` +
 > `apps/web/dist` 前端页面 + 第三方 `node_modules` 全在里面，**不依赖仓库外的任何全局 node_modules**。
 > 包与包之间是**相对路径软链**（`packages/bundle/web-app/node_modules/@deepseek-ai/dsh-web-frontend → ../../../../../apps/web`），
-> 所以整个 `runtime/dsh` 目录可以原样搬走（见 §6）。
+> 所以整个 `runtime/dsh` 目录可以原样搬走（见 §7.1）。
 
 ---
 
@@ -220,25 +220,54 @@ $DSH_HOME/profiles/web/
 
 ### 4.3 模型 provider
 
-没有模型 Key 时 **界面能正常打开、插件入口可用，但会话里发消息不会得到回复**。
-默认 provider 由 `dsh-base` 挂载：`llm-deepseek` 读取 `DEEPSEEK_API_KEY` 环境变量
-（或本 `DSH_HOME` 内的凭据）。给启动命令加一个环境变量即可：
+没有模型 Key 时 **界面能正常打开、插件入口可用，但会话里发消息不会得到回复**。默认 provider 由 `dsh-base` 挂载：`llm-deepseek` 读取 `DEEPSEEK_API_KEY` 环境变量（或本 `DSH_HOME` 内的凭据）。
+
+两种方式任选其一，**推荐用界面配置**。
+
+---
+
+## 5. 首次使用：配置模型
+
+### 5.1 方式一：界面配置（推荐）
+
+启动后打开浏览器地址 → 侧栏或右上角进入 **「设置」→「模型」**，页面提示「填入各提供商的 API 密钥即可使用其模型」。
+
+1. 点 **「添加模型提供商」**，按来源二选一：
+   - **「第三方模型提供商」**：从内置目录选 OpenAI / Anthropic / Kimi 等，填入 **「API 密钥」**；
+   - **「自定义模型 API」**：连中转站或自部署服务，需填 **「API 地址」**、协议与模型。
+2. 保存后卡片显示 **「API 密钥已配置」**（未配置时显示「API 密钥缺失」）。
+3. 回到会话，在输入框旁选择该模型即可对话。
+
+**凭据落在哪里**：本项目以自己的 `DSH_HOME` 启动，所以界面保存的密钥写在 **`runtime/dsh-home`** 内，**不会**写进用户本机的 `~/.dsh`。`runtime/` 已被 `.gitignore` 排除，也不会进仓库。
+
+> 若想验证"确实只落在本项目"：配置后执行
+> `grep -rl "sk-" runtime/dsh-home | head`（能看到文件即可），再对 `~/.dsh` 做同样的检查应无新增。
+
+### 5.2 方式二：环境变量
 
 ```bash
 DEEPSEEK_API_KEY='***' FDE_DB_PASSWORD='***' ./scripts/start-all.sh
 ```
 
-也可以后续在 Web 界面的「设置 → 模型」里配置（配置写在本项目自己的 `runtime/dsh-home` 内，不影响用户本机 DSH）。
+适合临时试用或 CI。界面配置的优先级高于环境变量回退（见设置页「API 密钥」说明：优先使用已保存的凭据，环境后备依次为启动环境、`$cwd/.env`、`$DSH_HOME/.env`）。
+
+### 5.3 配置完成后验证
+
+1. 侧栏「Web 工作台」→ 打开某需求节点；
+2. 会话区输入一句"你好"，确认有回复；
+3. 让模型产出当前节点的输出项，确认页面「输出项」出现下载按钮（这一步同时验证 T5-2/T5-3 的产出闭环）。
 
 ---
 
-## 5. 升级 / 重建 / 卸载
+
+
+## 6. 升级 / 重建 / 卸载
 
 | 目的 | 做法 |
 |---|---|
 | 只更新插件代码 | `cd fde-workbench-bundle && DSH_SRC=<仓库>/runtime/src bash scripts/build.sh`，然后重启 `start-all.sh`（浏览器端已加载的旧 bundle 需刷新页面） |
 | 重新生成本项目 profile | 停掉服务 → `rm -rf runtime/dsh-home/profiles/web` → `./scripts/setup-runtime.sh` |
-| 升级 DSH 版本 | 改脚本里的 `DSH_TAG`（或用 `DSH_TAG=<新tag>` 执行），**同时删掉 `runtime/src` 与 `runtime/dsh`** 后重跑 `setup-runtime.sh`；升级后必须完整走一遍 §7 的验收 |
+| 升级 DSH 版本 | 改脚本里的 `DSH_TAG`（或用 `DSH_TAG=<新tag>` 执行），**同时删掉 `runtime/src` 与 `runtime/dsh`** 后重跑 `setup-runtime.sh`；升级后必须完整走一遍 §8 的验收 |
 | 只重建 DSH、不动 profile/会话 | `rm -rf runtime/src runtime/dsh` → `./scripts/setup-runtime.sh`（profile 与 dsh-home 保留） |
 | 清空本项目所有 dsh 数据 | 停服务 → `rm -rf runtime/dsh-home runtime/agents-home` |
 | 完全卸载运行时 | 停服务 → `rm -rf runtime` |
@@ -248,7 +277,7 @@ DEEPSEEK_API_KEY='***' FDE_DB_PASSWORD='***' ./scripts/start-all.sh
 
 ---
 
-## 6. 换机器部署
+## 7. 换机器部署
 
 **分发方式：目标机现场构建**。仓库只带源码、脚本与锁文件，**不带** `runtime/`。
 
@@ -276,7 +305,7 @@ DSH_SOURCE_DIR=/path/to/deepseek-harness ./scripts/setup-runtime.sh
 如果连 npm registry 也访问不了（完全离线）：先在能联网的机器上用**相同操作系统与 CPU 架构**构建一份
 `runtime/dsh`，再整体拷过去（见下）。
 
-### 6.1 整体搬迁 `runtime/dsh`（可选）
+### 7.1 整体搬迁 `runtime/dsh`（可选）
 
 `runtime/dsh` 是自包含的，可以整体搬走；但它内含**当前平台的原生模块**（如 `node-pty`），
 所以**只能在同 OS / 同架构之间搬**（macOS arm64 → macOS arm64、Linux x64 → Linux x64）。
@@ -293,7 +322,7 @@ tar -xzf dsh-runtime-*.tgz
 
 ---
 
-## 7. 验收清单
+## 8. 验收清单
 
 ```bash
 # 记录用户环境基线（必须保持不变）
@@ -318,9 +347,9 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 
 ---
 
-## 8. 常见故障
+## 9. 常见故障
 
-### 8.1 离线 / 网络不可达
+### 9.1 离线 / 网络不可达
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -330,7 +359,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | 报 `TypeScript type stripping is unavailable` | `NODE_OPTIONS` 里带了 `--no-experimental-strip-types` | 取消该选项（脚本已在内部清空 `NODE_OPTIONS`，若仍出现请检查 `.npmrc`/shell 配置） |
 | `node-pty` / `koffi` 编译失败 | 缺编译工具链 | macOS：`xcode-select --install`；Debian/Ubuntu：`apt install build-essential python3` |
 
-### 8.2 端口被占用
+### 9.2 端口被占用
 
 ```text
 [错误] 端口 3080 已被占用（dsh web 需要它）。
@@ -341,14 +370,14 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 - 用户本机如果同时开着 **Desktop 版 DSH**（默认 57320 端口），与本项目不冲突，无需关闭。
 - 后端端口冲突同理：`FDE_SERVER_PORT=8082`。
 
-### 8.3 授权链接 / 401
+### 9.3 授权链接 / 401
 
 - 打开 `http://127.0.0.1:3080/` 得到纯文本 401：这是正常鉴权结果，请用启动日志里**带 `?token=` 的地址**访问。
 - 授权地址找不到：`grep '^dsh web:' runtime/logs/dsh-web.log | tail -1`。
 - 授权地址打不开 / 换浏览器后 401：token 与 cookie 属于**某一次启动**，重启服务后旧链接全部失效，重新取新地址。
 - 想把授权地址换成可收藏的地址：首次授权后 cookie 有效期内直接访问根地址即可；cookie 失效后重新走授权地址。
 
-### 8.4 profile 未生成 / 插件没出现
+### 9.4 profile 未生成 / 插件没出现
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -358,7 +387,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | 改了插件代码但界面没变 | 浏览器端 bundle 是启动时读取的 | 重新 `build.sh` → 重启 `start-all.sh` → 强刷 |
 | 页面 404 / 白屏 | `apps/web/dist` 缺失（前端未构建） | 重跑 `setup-runtime.sh`；确认 `runtime/dsh/apps/web/dist/index.html` 存在 |
 
-### 8.5 后端相关
+### 9.5 后端相关
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -368,7 +397,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 
 ---
 
-## 9. 已验证 / 未验证
+## 10. 已验证 / 未验证
 
 验证环境：macOS arm64、Node v24.21.0、pnpm 11.28.5、DSH `dsh-v0.2.2-rc.5`、无头 Chrome（Playwright）。
 
@@ -381,7 +410,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | `dsh web` 启动 + 授权链接换 cookie | ✅ 已验证 | 无 token → 401；带 `?token=` → 303 → 200，页面 `<title>DSH Local Build</title>` |
 | 侧栏入口「Web 工作台」 | ✅ 已验证 | 侧栏全局面板列表**第一项**（在「插件」之上），截图见验证记录 |
 | 工作台面板可打开 | ✅ 已验证 | 点击后中央区域显示「返回 / Web 工作台」标题栏与「节点会话」区 |
-| 面板内嵌入会话的消息流 / 输入框 | ❌ **未通过**（见 §9.1） | 面板显示会话 id 与标题，但会话内容区为空（`data-fde-workbench-embed` 未渲染，界面上也没有报错块） |
+| 面板内嵌入会话的消息流 / 输入框 | ❌ **未通过**（见 §10.1） | 面板显示会话 id 与标题，但会话内容区为空（`data-fde-workbench-embed` 未渲染，界面上也没有报错块） |
 | Java 后端与 dsh 同时启动、一起停止 | ✅ 已验证 | `/api/health` → `{"db":"ok"}`；SIGTERM 后 3080 / 8081 均释放、无残留进程 |
 | `~/.dsh`、`~/.agents` 未被读写 | ✅ 已验证 | 安装与启动前后 `ls -la` 对比逐字节一致 |
 | 错误提示（端口占用 / 缺密码 / 未 setup / 非法参数） | ✅ 已验证 | 四种情况均输出对应中文提示且不启动一半进程 |
@@ -389,7 +418,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN; lsof -nP -iTCP:8081 -sTCP:LISTEN
 | 从零（空 pnpm store）的网络下载耗时 | ⚠️ 未实测 | 本机 store 已预热；冷启动预计 3~10 分钟 |
 | 跨机器整目录搬迁 `runtime/dsh` | ⚠️ 未实测 | 依赖同 OS/架构 |
 
-### 9.1 已知问题：面板内嵌会话内容为空（需插件侧修复）
+### 10.1 已知问题：面板内嵌会话内容为空（需插件侧修复）
 
 现象与定位（T0-4 实测，**与运行脚本无关**）：
 
