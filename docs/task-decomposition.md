@@ -404,7 +404,7 @@ fde-platform-local/
 | T0-3 | ✅ 完成（提交 `545ae95`） | 构建可复现；浏览器产物外部依赖仅 react；替身 ctx 注册出 locale/工厂/main/侧栏四项；**安装与界面验证未执行**（改为装入自带 dsh 后验证） |
 | T0-4 | 未开始 | — |
 | T1-1 | ✅ 完成（提交 `9888845`） | `mvn clean install` 12 例全绿（lead 独立复跑）；curl 覆盖权限矩阵与乐观锁；时区断言 `+08:00`；8081 已释放 |
-| T1-2 | 未开始 | — |
+| T1-2 | ✅ 完成（提交 `c6c23c0`） | `mvn clean install` 18 例全绿（lead 独立复跑）；curl 覆盖越权、过期 revision、移除回滚与项目 1 还原 |
 | T1-3 | 未开始 | — |
 | T2-1 | 未开始 | — |
 | T2-3 | 未开始 | — |
@@ -431,3 +431,4 @@ fde-platform-local/
 | C5 | 原始需求文档含明文数据库密码，已替换为占位并清理历史 | 已处理，`docs/原始需求/…:74` |
 | C7 | DELETE 的 revision 传参方式 | 已定稿：查询参数 `?revision=N`（[api.md §1.2](api.md)） |
 | C8 | owner 判定是否双源校验 | 已定稿：`owner_id` 与成员表角色必须同时一致（[api.md §4](api.md)） |
+| C9 | 移除成员的引用完整性靠外键还是显式校验 | 已定稿：**显式校验**。实际外键 `fk_requirement_creator` 指向 `wb_user` 而非成员关系，外键拦不住 |

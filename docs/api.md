@@ -196,12 +196,18 @@ base_url: "http://127.0.0.1:8081"
 |---|---|---|---|
 | GET | `/api/projects/{projectId}/members` | M | 成员列表 |
 | POST | `/api/projects/{projectId}/members` | O | 添加成员 `{ "username": "demo2" }` |
-| DELETE | `/api/projects/{projectId}/members/{userId}` | O | 移除成员（不能移除 owner 自己，需先转让）；需带 `?revision=` 的项目版本号；同时删除该成员在此项目内的技能（含各版本），若其仍有需求则整体回滚 |
+| DELETE | `/api/projects/{projectId}/members/{userId}?revision=N` | O | 移除成员（不能移除 owner 自己，需先转让）；同时删除该成员在此项目内的技能（含各版本）；**引用完整性由写操作前的显式校验保证**（见下方说明） |
 | POST | `/api/projects/{projectId}/members/{userId}/transfer-owner` | O | 转让 owner |
 
 - 转让成功后：目标用户 `role=owner`，原 owner `role=member`，`wb_project.owner_id` 更新；**必须在同一事务内同时改这两处**。
 - **owner 判定为双源校验**：`wb_project.owner_id == 当前用户` **且** 成员表中存在该用户的 `role=owner` 记录。任一处不符按非 owner 处理（`10202`）。这样即便转让只改了一半也会被立刻暴露，而不会出现两个 owner 或无人可管。
-- 移除成员的事务顺序：① 删除 `wb_skill`（`created_by=该用户`）及其版本；② 删除成员记录。任一步失败整体回滚。
+- **移除成员的可移除性判定（显式校验，不依赖外键）**：
+  数据库外键 `fk_requirement_creator` 指向 `wb_user`（用户账号），**并不指向成员关系**，因此"用户仍是本项目成员"与"用户有需求"之间没有外键约束，仅删成员记录不会报错。同时，若先删技能又会连带删除被节点引用的技能。
+  因此移除前必须显式检查该用户在本项目内是否仍被引用：**需求（创建人）、流程（创建人）、节点输入/输出文件上传人、会话创建人、技能被节点的引用**。任一存在 → 返回 `409 / 10403`，`data` 给出引用清单，整体不做任何写操作。
+- 移除成员的事务顺序：① 可移除性校验通过；② 删除 `wb_skill`（`created_by=该用户`）及其版本（先版本后技能，`fk_skill_version_skill` 为 RESTRICT）；③ 删除成员记录。任一步失败整体回滚。
+
+- **转让 owner 的规则**：原 owner 降为 `member`（不移出项目，保留只读访问）；转让给自己 → `409 / 10404`；移除 owner 自己 → `409 / 10404`。
+- **成员增删不推进项目 `revision`**，只有转让推进会 +1；`DELETE` 上的 `revision` 是前置一致性校验，不是并发锁。
 - 添加不存在的用户名 → `404 10301`；已是成员 → `409 10401`。
 
 ---
