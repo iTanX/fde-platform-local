@@ -1,16 +1,17 @@
 /**
  * Web 工作台插件 —— Client 半（浏览器内，与 DSH 前端同一个 React 树）。
  *
- * 本阶段只做三件事：
+ * 本任务（T5-3）在 T0-3 骨架上补齐业务客户端，改动集中在「注入什么」与「面板渲染什么」：
  * 1. 侧栏全局面板列表注册「Web 工作台」入口（`sidebar.panellist`，order -100 = 列表第一行）；
- * 2. 为同一个面板 id 注册 `main` keyed 面板，渲染工作台外壳 `WorkbenchMain`；
- * 3. 注册一个**会话作用域的单槽位** `workbench.node.chat`，其组件里面
- *    `<SessionProvider session={reference}>` + 渲染官方 `conversation.content`
- *    （variant = 'embedded'），即面板内的真实 DSH 会话。
+ * 2. 为同一个面板 id 注册 `main` keyed 面板，渲染工作台外壳 `WorkbenchMain`
+ *    （登录 → 项目中心 → 项目四 Tab → 需求 → 节点页的完整页面栈）；
+ * 3. 注册会话作用域单槽位 `workbench.node.chat`（两级槽位：外壳 + 内容座席），
+ *    节点页「会话」视图用的就是这个槽位 —— 槽位结构与 T0-3 实测通过的版本**完全一致**，
+ *    只是嵌套层级换到工作台外壳之内。
  *
- * 3 的结构与官方 ui-subagent 的 `sidebar.chat.conversation` + `ConversationSlotPanel`
- * 完全一致：外层声明会话子槽位，内层槽位组件里调用 `conversation.content`。
- * 这里**不再**自建工厂 —— 旧写法把局部槽位名当工厂名渲染，`factoryOf()` 查不到就静默返回 null。
+ * 为什么槽位结构不动：T0-4 已经实测过「注册项声明非 root 子槽位 → 框架发放 SessionProvider 座位」
+ * 这条链路（README §3 的四个坑全部踩过）；这里只把参数（接口集合、页面栈 store、新建会话能力）
+ * 注入给 `main` 面板，由面板内部的页面决定何时渲染这个槽位。
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -20,14 +21,18 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import { createWorkbenchApi, type WorkbenchApi } from './api/index.ts'
+import { ApiClient } from './api/client.ts'
 import { dicts, NS, type WorkbenchLocaleKey } from './locales.ts'
 import { WorkbenchPanelIcon } from './main/WorkbenchPanelIcon.tsx'
 import { WorkbenchMain, type WorkbenchMainInjected } from './main/WorkbenchMain.tsx'
+import { AppStore } from './store/app-store.ts'
 import { WorkbenchChatShell, WorkbenchConversationPanel, type NodeChatOwnerProps } from './session/NodeSessionView.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** 工作台面板自身的文案（外壳、会话视图的提示与错误态）。 */
+    /** 工作台面板自身的文案（页面、表单、会话视图、错误态）。 */
     workbench: WorkbenchLocaleKey
   }
 
@@ -36,7 +41,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * 工作台面板内嵌入的会话**外壳**（会话作用域单槽位）。
      * 组件 `WorkbenchChatShell`：`<SessionProvider session={reference}>` 绑定会话后，
      * 渲染自己的会话子槽位 `workbench.node.chat.conversation`。
-     * 由外层 `main` 面板 `renderSlot('workbench.node.chat', { reference })` 渲染。
+     * 由外层 `main` 面板通过 `renderSlot('workbench.node.chat', { reference })` 渲染。
      *
      * `owner` 声明渲染点传来的参数：槽位注册项本身不接收 owner 参数（`register()` 只传框架座席），
      * owner 参数在**渲染时**与座席合并后落到组件上，所以必须由 SlotMap 的 `owner` 类型表声明，
@@ -48,8 +53,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * 官方对应项：ui-subagent 的 `sidebar.chat.conversation`（由 `ConversationSlotPanel` 承接）。
      *
      * 这一层存在的意义：渲染框架只在**注册项自身声明了非 root 子槽位**时才给它发放
-     * `SessionProvider` 座位（ui-renderer `scoped-slots.tsx` 的 `standardKit()`：
-     * `if (Object.values(entry.children).some(spec => spec.scope !== 'root')) kit['SessionProvider'] = …`）。
+     * `SessionProvider` 座位（ui-renderer `scoped-slots.tsx` 的 `standardKit()`），
      * 外层槽位因此必须声明本子槽位，才能在自己的组件里 `<SessionProvider>` 包住它。
      */
     'workbench.node.chat.conversation': { kind: 'single'; scope: 'session' }
@@ -59,8 +63,50 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** 侧栏入口与 `main` 面板共用同一个面板 id（官方 plugin-manager / ui-schedule 同款做法）。 */
 export const PANEL_ID = 'workbench' as MainPanelId
 
-/** 本插件 Client 半要求的服务：注册槽位、取文案、面板导航、会话与新建会话。 */
-export const inject = ['slots', 'locale', 'layout', 'sessions', 'uiWorkspace']
+/**
+ * 本插件 Client 半要求的服务：
+ * - `slots` / `locale` / `layout` / `sessions` / `uiWorkspace`：注册槽位、文案、面板导航、会话与新建会话（T0-3 已有）；
+ * - `workspaces`：T5-3 的「新建会话」要先用 `ctx.uiWorkspace.connectWorkspace(workspaceId)` 拿到
+ *   工作区标识。cordis 的 `ctx.xxx` getter 在未 inject 时会直接抛
+ *   `cannot get property "workspaces" without inject`（实测），因此必须显式声明。
+ */
+export const inject = ['slots', 'locale', 'layout', 'sessions', 'uiWorkspace', 'workspaces']
+
+/**
+ * 新建一个 DSH 会话并返回它的 SessionId。
+ *
+ * 为什么不用 `uiWorkspace.startSession()`：它是「选中并打开一个空白会话」的导航动作，
+ * 既**不返回** SessionId，又要求同一个工作区里已有可复用的空白会话——DSH 里一个会话都没有时，
+ * 它会把主界面切到「选择工作区」的空态（实测），把用户从工作台里挤出去。所以不用它。
+ *
+ * 采用 `uiWorkspace.connectWorkspace(workspaceId)`：
+ * - 它是官方公开 API，**返回 SessionId**，业务侧登记会话（`POST /api/requirements/{rid}/sessions`）正需要它；
+ * - 它只建/复用工作区里的空白会话，不改变侧栏选中态，不会把界面切走。
+ * 工作区标识从 `ctx.workspaces`（DSH 自己的工作区列表）解析：优先取与"当前会话 cwd"相同的工作区，
+ * 否则取列表第一个。一个工作区都没有时返回可读错误（页面显示"重试"，不伪造会话）。
+ *
+ * 说明（交接 T5-4/T6-1）：按 PRD 设计，一个需求对应一个 workspace，路径由 Host 半生成；
+ * 届时这里应改为「先按需求 workspace 路径找到/创建对应工作区」再 connectWorkspace，
+ * 现在先复用 DSH 现有工作区。
+ *
+ * @param ctx - 浏览器侧插件上下文
+ * @returns 新会话标识，或错误文案
+ */
+async function createDshSession(ctx: ClientContext): Promise<{ sessionId?: string; error?: string }> {
+  const workspaces = ctx.workspaces.list.getSnapshot().items
+  const sessions = ctx.sessions.list.getSnapshot()
+  const currentCwd = sessions.ids[0] === undefined ? undefined : sessions.byId[sessions.ids[0]]?.cwd
+  const workspace = workspaces.find(item => currentCwd !== undefined && item.path === currentCwd) ?? workspaces[0]
+  if (workspace === undefined) {
+    return { error: 'DSH 中还没有工作区，无法新建会话（请先在 DSH 里添加一个工作区）' }
+  }
+  try {
+    const sessionId = await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId as WorkspaceId)
+    return { sessionId: String(sessionId) }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+}
 
 /**
  * 注册工作台入口、面板与嵌入会话槽位。
@@ -69,6 +115,13 @@ export const inject = ['slots', 'locale', 'layout', 'sessions', 'uiWorkspace']
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, dicts), 'fde-workbench: dictionaries')
   const t = ctx.locale.bind(NS)
+
+  // 业务接口与页面栈：整个插件生命周期内只有一个实例（登出只清 token 与页面栈，不重建）
+  const apiClient = new ApiClient()
+  const api: WorkbenchApi = createWorkbenchApi(apiClient)
+  const store = new AppStore()
+  // 401（token 过期）统一回到登录页：由页面栈驱动，不做整页跳转
+  apiClient.onUnauthorized(() => { store.signOut() })
 
   // 工作台整页：`main` 是 keyed 槽位，key 必须与侧栏入口 id 相同。
   // 所有跨服务依赖集中在 inject 里显式传入，组件本身不读浏览器全局。
@@ -82,9 +135,17 @@ export function apply(ctx: ClientContext): void {
     children: { 'workbench.node.chat': { kind: 'single', scope: 'session' } },
     inject: (): WorkbenchMainInjected => ({
       layout: ctx.layout,
-      sessionHost: { sessions: ctx.sessions },
-      // 新建会话走官方导航动作（与侧栏「新建会话」同一条路径），不碰业务接口。
-      createSession: () => { ctx.uiWorkspace.startSession() },
+      api,
+      store,
+      sessionHost: {
+        sessions: ctx.sessions,
+        // 新建会话走官方 connectWorkspace（返回 SessionId，且不切走侧栏选中态），详见 createDshSession 的注释；
+        // 业务登记（POST /api/requirements/{rid}/sessions）由页面在拿到 SessionId 后完成。
+        createSession: async () => {
+          const created = await createDshSession(ctx)
+          return { dshSessionId: created.sessionId, registerError: created.error }
+        },
+      },
     }),
   }, WorkbenchMain)), 'fde-workbench: main panel')
 
@@ -107,9 +168,7 @@ export function apply(ctx: ClientContext): void {
 
   // ② 会话内容座席：真正的 conversation.content 工厂调用方 → 组件 WorkbenchConversationPanel
   //    （官方 ui-subagent 的 `sidebar.chat.conversation` + ConversationSlotPanel 的角色）。
-  //    它已在 <SessionProvider> 之内，直接 renderFactorySlot('conversation.content', …)：
-  //    这里调的是**工厂**，工厂定义由 ui-conversation 注册 → `factoryOf()` 查得到 → 有内容。
-  //    （旧写法把局部槽位名 `workbench.node.chat.conversation` 当工厂名传，查不到 → 静默 null。）
+  //    它已在 <SessionProvider> 之内，直接 renderFactorySlot('conversation.content', …)。
   ctx.effect(() => ctx.slots.inject('workbench.node.chat.conversation', () => ctx.slots.register({
     name: 'workbench.node.chat.conversation',
   }, WorkbenchConversationPanel)), 'fde-workbench: embedded conversation content')
